@@ -14,6 +14,7 @@
 #include <rex/system/kernel_state.h>
 #include <string>
 #include <vector>
+#include "frame_time.h"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -183,6 +184,9 @@ struct Setting {
 uint32_t active_menu = 0;
 std::vector<Setting> settings;
 std::vector<Setting> saved_settings;
+std::vector<Setting> applying_settings;
+std::string applying_request;
+uint64_t request_id = 0;
 std::vector<std::pair<std::string, std::string>> preview_baseline;
 
 bool IsLive(const Setting &setting) {
@@ -295,6 +299,8 @@ void Snapshot() {
     if (setting.value.empty())
       setting.value = setting.choices.front().value;
   }
+  if (rex::cvar::GetFlagByName("fh1_scene_720p_native_hud") == "true")
+    settings[2].value = rex::cvar::GetFlagByName("fh1_native_scene_scale");
   if (rex::cvar::GetFlagByName("present_effect") == "fsr3")
     settings[1].value = "fsr3_" + rex::cvar::GetFlagByName("fsr3_mode");
   if (!saved_settings.empty()) {
@@ -372,21 +378,14 @@ void PauseRows(Native &ui, uint8_t *base, bool show) {
 }
 const char *Help(size_t i) {
   constexpr const char *help[] = {
-      "Output resolution. The HUD stays at the output resolution. Changes "
-      "apply next launch.",
-      "DLSS increases performance; DLAA uses native input for anti-aliasing. "
-      "Changes apply next launch.",
-      "Scene resolution without reconstruction. DLSS and FSR choose their own "
-      "input resolution. Changes apply next launch.",
-      "Maximum frame rate. Changes apply next launch.",
-      "Synchronize presentation with the display. Applies immediately. Save "
-      "keeps the change; Back undoes unsaved edits.",
-      "Improve texture detail on roads and distant surfaces. Applies "
-      "immediately. Save keeps the change; Back undoes unsaved edits.",
-      "Position the ultrawide HUD at the center or screen edges. Applies "
-      "immediately during gameplay when HUD layout is enabled. Back undoes "
-      "unsaved edits."};
-  return i < std::size(help) ? help[i] : "Changes apply next launch.";
+      "Output resolution. The HUD stays native. Save applies the change in this session.",
+      "DLSS increases performance; DLAA uses native input. Save applies the change in this session.",
+      "Scene resolution with Native selected. Reconstruction chooses its own input size. Save applies the change.",
+      "Maximum frame rate. Save applies the limit without restarting.",
+      "Synchronize presentation with the display. Previews immediately. Back undoes unsaved edits.",
+      "Improve texture detail on roads and distant surfaces. Previews immediately. Back undoes unsaved edits.",
+      "Move ultrawide HUD anchors to the center or edges. Previews immediately when HUD layout is enabled."};
+  return i < std::size(help) ? help[i] : "Save applies graphics changes without restarting.";
 }
 void Footer(Native &ui, uint8_t *base) {
   auto footer = ui.Call(0x82746638, {graphics_screen});
@@ -429,7 +428,7 @@ extern "C" REX_FUNC(sub_827303E8) {
     for (unsigned offset = 0; offset < 0x1C; offset += 4)
       Write(base, row + offset, 0);
     Write(base, row, 0x82049434);
-    auto label = ui.Text(setting.label + (IsLive(setting) ? "" : " *"));
+    auto label = ui.Text(setting.label);
     ui.Call(0x82471820, {row + 0x10, label});
     ui.Call(0x824CEAB0, {label});
     Write(base, row + 0xC, uint32_t(i));
@@ -453,14 +452,14 @@ extern "C" REX_FUNC(sub_827303E8) {
   ui.Field(graphics_screen, "TEXT_SCREEN_NAME", graphics_screen + 0x1F4,
            "GRAPHICS SETTINGS");
   ui.Field(graphics_screen, "TEXT_EARNINGS", graphics_screen + 0x1E8,
-           "* RESTART REQUIRED");
+           "NO RESTART NEEDED");
   ui.Field(graphics_screen, "TEXT_TITLE", graphics_screen + 0x170,
            "GRAPHICS SETTINGS");
   ui.Field(graphics_screen, "TEXT_DESCRIPTION", graphics_screen + 0x17C,
            Help(0));
   ui.PathText(graphics_screen,
               "parent.Layer.Group_BLADE.Group_EARNINGS.Text_EARNINGS_LABEL",
-              graphics_screen + 0x1DC, "LIVE PREVIEW");
+              graphics_screen + 0x1DC, "GRAPHICS");
   PauseRows(ui, base, false);
   Footer(ui, base);
   REXLOG_INFO("Graphics menu: native fixed settings page built ({} rows)",
@@ -522,22 +521,31 @@ extern "C" REX_FUNC(sub_82736B08) {
   if (!ui)
     return;
   auto event = ui.Event(graphics_screen, ctx.r4.u32);
+  if (!applying_request.empty()) return;
   if (event == 0x5D) {
     for (size_t i = 0; i < native_rows.size(); ++i) {
       auto choice = Read(base, native_rows[i] + 8);
       if (choice < settings[i].choices.size())
         settings[i].value = settings[i].choices[choice].value;
     }
-    bool saved = Save();
-    if (saved) {
-      saved_settings = settings;
-      RememberPreview();
+    if (!applying_request.empty()) return;
+    if (rex::cvar::GetFlagByName("gpu_backend") != "vulkan" ||
+        !rex::cvar::GetFlagInfo("fh1_graphics_request")) {
+      ui.Binding(graphics_screen + 0x17C, "Live graphics requires the updated Vulkan renderer.");
+      return;
     }
-    ui.Binding(graphics_screen + 0x17C,
-               saved ? "Saved. Live changes are kept. Starred settings apply "
-                       "next launch."
-                     : "Could not save settings. Please try again.");
-    REXLOG_INFO("Graphics menu: save {}", saved ? "complete" : "failed");
+    const auto output = settings[0].value;
+    const auto width = output == "4k" ? "3840" : output == "1080p" ? "1920" : "2560";
+    const auto height = output == "4k" ? "2160" : output == "1080p" ? "1080" : "1440";
+    applying_settings = settings;
+    applying_request = std::to_string(++request_id) + " " + width + " " + height +
+        " " + settings[2].value + " " + settings[1].value;
+    if (!rex::cvar::SetFlagByName("fh1_graphics_request", applying_request)) {
+      applying_request.clear();
+      ui.Binding(graphics_screen + 0x17C, "Could not apply graphics settings.");
+      return;
+    }
+    ui.Binding(graphics_screen + 0x17C, "Applying graphics settings...");
   } else if (event == 0x60) {
     RestorePreview();
     PauseRows(ui, base, true);
@@ -578,4 +586,40 @@ extern "C" REX_FUNC(MenuSelect) {
   OriginalSelect(ctx, base);
 }
 
+namespace forza::graphics_menu {
+void Tick(PPCContext& ctx, uint8_t* base) {
+  if (applying_request.empty()) return;
+  const auto result = rex::cvar::GetFlagByName("fh1_graphics_result");
+  const auto prefix = applying_request + "|";
+  if (result.rfind(prefix, 0) != 0) return;
+  const auto status = result.substr(prefix.size());
+  applying_request.clear();
+  std::string message;
+  if (status == "ok") {
+    settings = applying_settings;
+    const bool rate_changed = rex::cvar::GetFlagByName("frame_rate") != settings[3].value;
+    rex::cvar::SetFlagByName("frame_rate", settings[3].value);
+    rex::cvar::SetFlagByName("video_mode_refresh_rate", std::to_string(frame_time::VblankHz()));
+    if (rate_changed) frame_time::ResetRenderTiming();
+    rex::cvar::SetFlagByName("resolution", settings[0].value);
+    const bool saved = Save();
+    saved_settings = settings;
+    RememberPreview();
+    message = saved ? "Applied and saved. No restart needed."
+                    : "Applied, but could not save. Select Save to retry.";
+  } else {
+    message = status;
+  }
+  applying_settings.clear();
+  REXLOG_INFO("Graphics menu: {}", message);
+  if (graphics_screen) {
+    Native ui(ctx, base);
+    if (ui) ui.Binding(graphics_screen + 0x17C, message);
+  }
+}
+} // namespace forza::graphics_menu
+#else
+namespace forza::graphics_menu {
+void Tick(PPCContext&, uint8_t*) {}
+}
 #endif // FORZA_TU4

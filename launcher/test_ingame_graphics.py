@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from forza_launcher import ingame, schema
+from forza_launcher import dlss, gpu, ingame, schema
 from forza_launcher.config import Config
 
 
@@ -96,6 +96,35 @@ class InGameGraphicsTests(unittest.TestCase):
         ingame.import_pending(self.cfg, lambda _: None)
         self.assertEqual(self.cfg.online["mode"], "offline")
         self.assertFalse(self.cfg.settings["async_shader_compilation"])
+
+    def test_native_scene_scale_does_not_reduce_hud_resolution(self):
+        self.cfg.settings.update(gpu_backend="vulkan", resolution="1440p",
+                                 resolution_scale=1, fh1_upscaler="off",
+                                 present_effect="bilinear", forza_ultrawide=False)
+        args, env = [], {}
+        with patch("forza_launcher.dlss.ready", return_value=False):
+            ingame.configure_runtime(self.cfg, env, args)
+        self.assertIn("--fh1_native_scene_scale=1", args)
+        self.assertIn("--resolution_scale=2", args)
+        self.assertIn("--fh1_output_width=2560", args)
+        self.assertIn("--fh1_output_height=1440", args)
+        self.assertNotIn("FORZA_DLSS_RUNTIME", env)
+
+    def test_custom_ultrawide_keeps_its_existing_render_path(self):
+        self.cfg.settings.update(gpu_backend="vulkan", resolution="1440p",
+                                 resolution_scale=2, forza_ultrawide=True)
+        args = []
+        with patch("forza_launcher.dlss.ready", return_value=False):
+            ingame.configure_runtime(self.cfg, {}, args)
+        self.assertEqual(args, [])
+
+    def test_native_nvidia_session_prepares_runtime_for_later_menu_use(self):
+        self.cfg.settings.update(gpu_backend="vulkan", fh1_upscaler="off")
+        with patch("forza_launcher.paths.IS_WINDOWS", True), patch.object(self.cfg, "gpu_vendor", return_value=gpu.NVIDIA):
+            self.assertTrue(dlss.menu_runtime_enabled(self.cfg))
+            self.assertFalse(dlss.enabled(self.cfg))
+            self.cfg.settings["gpu_backend"] = "d3d12"
+            self.assertFalse(dlss.menu_runtime_enabled(self.cfg))
 
 
 if __name__ == "__main__":

@@ -264,7 +264,7 @@ class MainWindow(QMainWindow):
             return
         self.settings.flush()
         preparation = (self.cfg.data_home(), install.dir, self.cfg.settings.get("fh1_upscaler"))
-        if dlss.enabled(self.cfg) and self._dlss_prepared != preparation:
+        if (dlss.enabled(self.cfg) or dlss.menu_runtime_enabled(self.cfg)) and self._dlss_prepared != preparation:
             self._prepare_dlss(install.dir)
             return
         self._dlss_prepared = None
@@ -346,8 +346,16 @@ class MainWindow(QMainWindow):
             self._dlss_prepared = self._dlss_preparing
             self.start_game()
         else:
-            self._dlss_prepared = None
-            self.play.show_message(f"Could not set up NVIDIA DLSS: {message}", True, keep=True)
+            if not dlss.enabled(self.cfg) and dlss.menu_runtime_enabled(self.cfg):
+                # DLSS is optional in a native session. A failed download must
+                # not prevent playing offline with native rendering.
+                self._dlss_prepared = self._dlss_preparing
+                self.start_game()
+                self.play.show_message(f"Native rendering is available. Could not set up NVIDIA DLSS: {message}",
+                                       True, keep=True)
+            else:
+                self._dlss_prepared = None
+                self.play.show_message(f"Could not set up NVIDIA DLSS: {message}", True, keep=True)
 
     def stop_game(self):
         if self._dlss_task is not None:

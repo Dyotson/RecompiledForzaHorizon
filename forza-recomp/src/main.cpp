@@ -39,7 +39,7 @@ REXCVAR_DEFINE_INT32(frame_rate, 30, "Display",
       }
       return fps == 30 || (fps >= 60 && fps <= 240);
     })
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
 

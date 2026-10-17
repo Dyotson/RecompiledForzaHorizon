@@ -10,6 +10,27 @@ NVIDIA = {"quality", "balanced", "dlss", "dlaa"}
 FSR3 = {"fsr3_quality", "fsr3_balanced", "fsr3_performance", "fsr3_native"}
 
 
+def configure_runtime(cfg, env, args):
+    """Keep native scene scale independent of the output/HUD, as the live menu does."""
+    from . import dlss, paths
+    if paths.IS_WINDOWS and dlss.ready(cfg):
+        env.setdefault("FORZA_DLSS_RUNTIME", str(dlss.runtime_dir(cfg)))
+    values = cfg.settings
+    if (values.get("gpu_backend", "vulkan") != "vulkan" or
+            values.get("forza_ultrawide") or dlss.enabled(cfg) or
+            values.get("present_effect") == "fsr3"):
+        return
+    sizes = {"1080p": (1920, 1080, 2), "1440p": (2560, 1440, 2), "4k": (3840, 2160, 3)}
+    size = sizes.get(values.get("resolution"))
+    scene_scale = int(values.get("resolution_scale", 1))
+    if size is None or scene_scale not in (1, 2, 3):
+        return
+    width, height, output_scale = size
+    args += ["--fh1_scene_720p_native_hud=true", f"--fh1_native_scene_scale={scene_scale}",
+             f"--resolution_scale={output_scale}", f"--fh1_output_width={width}",
+             f"--fh1_output_height={height}"]
+
+
 def translate(document, current):
     """Validate the complete request before changing any launcher setting."""
     if (not isinstance(document, dict) or

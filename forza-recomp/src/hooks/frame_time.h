@@ -19,5 +19,6 @@ double TargetMs();
 
 // The render thread handed a frame to VdSwap (src/debug/frame_dump.cpp).
 void OnGuestSwap();
+void ResetRenderTiming();
 
 }  // namespace forza::frame_time
