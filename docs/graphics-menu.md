@@ -47,7 +47,15 @@ leaving the screen kept it active and the pending launcher request contained
 the matching value. Renderer sampler parameters are regenerated per draw,
 while VSync and the HUD-layout calculation read their flags during execution.
 
-The existing relaunch test has a Windows file-handle cleanup failure reproduced
-unchanged on main. One DLSS run lost the Vulkan device before the pause menu
+After rebasing onto `82b282e`, the full launcher suite ran 179 tests with 10
+failures, 5 errors and 23 skips. A separate checkout of that exact main revision
+ran 171 tests with the same 15 failing test names and 23 skips; all eight added
+tests passed. Existing failures concern environment cleanup, DLC links, tool
+discovery, updater expectations and an open file in relaunch-test cleanup.
+
+The Windows TU4 build and disc-mode syntax checks of the new hook and app
+integration pass. The disc executable has not been built or run locally because
+its generated code is not present; these syntax checks do not replace a full
+disc build. One earlier DLSS run lost the Vulkan device before the pause menu
 opened; native rendering was used for final layout validation. This feature
 does not resolve that separate renderer stability issue.
