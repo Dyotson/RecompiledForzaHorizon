@@ -1,6 +1,6 @@
 # In-game graphics settings
 
-On Title Update 4, open **Graphics Settings** from the original pause menu.
+On Title Update 4, open **Graphics** above **Quit** in the original pause menu.
 The screen uses the original difficulty screen's spinner list, font, selection
 highlight and controller input. No replacement game assets are installed.
 

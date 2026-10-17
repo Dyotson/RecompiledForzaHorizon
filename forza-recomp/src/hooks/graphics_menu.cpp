@@ -347,7 +347,22 @@ extern "C" REX_FUNC(MenuBind) {
   active_menu = ctx.r3.u32;
   Native ui(ctx, base);
   if (ui) {
-    ui.Add(active_menu, kGraphics, "GRAPHICS SETTINGS");
+    ui.Add(active_menu, kGraphics, "GRAPHICS");
+    // The TU4 data source keeps display order in a vector of row pointers at
+    // +0x28, independently of its ID lookup. Move our appended row above Quit
+    // before the original bind publishes the list to the native component.
+    const uint32_t rows = active_menu + 0x174 + 0x28;
+    const uint32_t begin = Read(base, rows);
+    const uint32_t end = Read(base, rows + 4);
+    if (begin && end >= begin && end - begin >= 8 &&
+        (end - begin) % 4 == 0) {
+      const uint32_t graphics = Read(base, end - 4);
+      const uint32_t previous = Read(base, end - 8);
+      if (graphics && Read(base, graphics + 8) == kGraphics) {
+        Write(base, end - 8, graphics);
+        Write(base, end - 4, previous);
+      }
+    }
     REXLOG_INFO("Graphics menu: native pause entry added");
   }
   OriginalBind(ctx, base);
