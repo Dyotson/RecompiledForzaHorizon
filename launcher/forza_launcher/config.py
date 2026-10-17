@@ -75,11 +75,20 @@ class Config:
         if isinstance(data, dict):
             _merge(self.d, data)
             self.loaded = True
+        # Migrate the former combined AA/upscaling selectors before choice coercion.
+        if self.d["settings"].get("fh1_upscaler") == "dlaa":
+            self.d["settings"].update(fh1_upscaler="off", forza_antialiasing="dlaa")
+        elif (self.d["settings"].get("present_effect") == "fsr3" and
+              self.d["settings"].get("fsr3_mode") == "native"):
+            self.d["settings"].update(present_effect="bilinear", fsr3_mode="quality",
+                                      forza_antialiasing="fsr3_native")
         for key, setting in schema.BY_KEY.items():
             self.d["settings"][key] = schema.coerce(setting, self.d["settings"].get(key))
         online = self.d["online"]
         if online.get("mode") == "custom" and online.get("custom_server", "").strip() in OLD_PUBLIC_SERVERS:
             online["mode"], online["custom_server"] = "public", ""
+        from . import ingame
+        ingame.import_pending(self)
 
     def save(self):
         _atomic_write(self.path, json.dumps(self.d, indent=2) + "\n")
@@ -190,7 +199,7 @@ def render_toml(cfg: Config) -> str:
     lines = ["# Written by the Forza Horizon 1: ReImagined launcher. Change settings there;",
              "# keys added under 'Other settings' (Advanced) are kept."]
     for s in schema.S:
-        if not s.applies() or s.key in ("fh1_output_resolution", "fsr3_mode", "fsr3_output_resolution"):
+        if not s.applies() or s.key in ("fh1_output_resolution", "fsr3_mode", "fsr3_output_resolution", "forza_antialiasing"):
             continue
         v = schema.coerce(s, cfg.settings.get(s.key, s.default))
         if v != s.default:
@@ -223,6 +232,10 @@ def import_toml(cfg: Config, text: str) -> None:
         flat = flatten(parse_toml(text))
     except Exception:
         return
+    if flat.get("fh1_upscaler") == "dlaa":
+        flat.update(fh1_upscaler="off", forza_antialiasing="dlaa")
+    if flat.get("present_effect") == "fsr3" and flat.get("fsr3_mode") == "native":
+        flat.update(present_effect="bilinear", fsr3_mode="quality", forza_antialiasing="fsr3_native")
     extras = []
     for key, val in flat.items():
         s = schema.BY_KEY.get(key)

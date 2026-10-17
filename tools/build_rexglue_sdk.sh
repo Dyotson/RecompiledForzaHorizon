@@ -121,6 +121,11 @@ plugin_new="$OVERLAY/lib/.librexgpu-xenos.new"
 cp "$built" "$plugin_new"
 mv -f "$plugin_new" "$OVERLAY/lib/librexgpu-xenos.so"
 echo "patched plugin: $OVERLAY/lib/librexgpu-xenos.so"
+# Keep this outside the nightly's symlinked share tree.
+if [ -f "$SRC/out/linux-amd64/Release/SMAA-LICENSE.txt" ]; then
+    mkdir -p "$OVERLAY/fh1-licenses"
+    cp "$SRC/out/linux-amd64/Release/SMAA-LICENSE.txt" "$OVERLAY/fh1-licenses/SMAA.txt"
+fi
 
 # The runtime (patch 0028: faster memory protection queries). Same commit as the nightly's,
 # so it is a drop-in; give it the nightly's RUNPATH (its own is the build tree's).

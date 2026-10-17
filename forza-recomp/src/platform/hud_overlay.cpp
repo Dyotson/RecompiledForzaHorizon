@@ -1,6 +1,9 @@
 // forza - the challenge text box over the game; see hud_overlay.h.
 
 #include "hud_overlay.h"
+#include "performance_history.h"
+#include <rex/cvar.h>
+#include <string_view>
 
 #include <imgui.h>
 #include <rex/logging.h>
@@ -14,6 +17,13 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+
+REXCVAR_DEFINE_STRING(forza_performance_overlay, "off", "Display",
+    "Performance overlay: off, fps, or graph (game-frame timing)")
+    .validator([](std::string_view value) {
+      return value == "off" || value == "fps" || value == "graph";
+    })
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace forza {
 namespace {
@@ -159,6 +169,77 @@ class HudDialog final : public rex::ui::ImGuiDialog {
   std::atomic<bool> registered_{false};
 };
 
+class PerformanceDialog final : public rex::ui::ImGuiDialog {
+ public:
+  PerformanceDialog(rex::ui::ImGuiDrawer* drawer, rex::ui::WindowedAppContext& context)
+      : ImGuiDialog(drawer), drawer_(drawer), context_(context) {
+    drawer_->RemoveDialog(this);
+  }
+  bool WantsContinuousRepaint() const override { return false; }
+  void Update() {
+    const auto value = REXCVAR_GET(forza_performance_overlay);
+    const int mode = value == "graph" ? 2 : value == "fps" ? 1 : 0;
+    const int previous = mode_.exchange(mode);
+    if (previous == mode) return;
+    if (!previous) {
+      std::lock_guard lock(mutex_);
+      history_ = PerformanceHistory{};
+    }
+    context_.CallInUIThread([this] {
+      if (mode_.load()) drawer_->AddDialog(this);
+      else drawer_->RemoveDialog(this);
+    });
+  }
+  void Frame() {
+    if (!mode_.load()) return;
+    std::lock_guard lock(mutex_);
+    history_.Record(Now());
+  }
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    const int mode = mode_.load();
+    if (!mode) return;
+    std::array<float, PerformanceHistory::kCapacity> ms;
+    size_t count;
+    double fps;
+    {
+      std::lock_guard lock(mutex_);
+      ms = history_.Ordered();
+      count = history_.count();
+      fps = history_.Fps(Now());
+    }
+    const float scale = std::clamp(io.DisplaySize.y / 1080.0f, 1.0f, 2.0f);
+    ImGui::SetNextWindowPos(ImVec2(16 * scale, 16 * scale), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.78f);
+    constexpr auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing;
+    if (ImGui::Begin("##forza_performance", nullptr, flags)) {
+      ImGui::SetWindowFontScale(1.5f * scale);
+      ImGui::Text("%.0f FPS", fps);
+      if (mode == 2) {
+        const float latest = count ? ms[count - 1] : 0;
+        const float peak = count ? *std::max_element(ms.begin(), ms.begin() + count) : 0;
+        ImGui::Text("%.1f ms   peak %.1f ms", latest, peak);
+        // Auto-range retains long hitches instead of clipping them at 33 ms.
+        ImGui::PlotLines("##frame_times", ms.data(), int(count), 0, "Game frame time (ms)",
+                         0, std::max(33.3f, peak * 1.1f), ImVec2(270 * scale, 70 * scale));
+      }
+    }
+    ImGui::End();
+  }
+ private:
+  static double Now() {
+    return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();
+  }
+  rex::ui::ImGuiDrawer* drawer_;
+  rex::ui::WindowedAppContext& context_;
+  std::atomic<int> mode_{0};
+  std::mutex mutex_;
+  PerformanceHistory history_;
+};
+PerformanceDialog* performance = nullptr;
+
 // Lives for the whole run (the drawer keeps a raw pointer while it is registered).
 HudDialog* hud = nullptr;
 
@@ -168,12 +249,17 @@ void InstallHud(rex::ui::ImGuiDrawer* drawer, rex::ui::WindowedAppContext& app_c
                 rex::ui::Window* window) {
   if (!drawer || hud) return;
   hud = new HudDialog(drawer, app_context, window);
+  performance = new PerformanceDialog(drawer, app_context);
+  performance->Update();
 }
 
 void HudShow(const std::string& title, const std::string& body, double seconds, bool log) {
   if (log) REXLOG_INFO("HUD: {} | {}", title, body);
   if (hud) hud->Show(title, body, seconds);
 }
+
+void PerformanceOverlayFrame() { if (performance) performance->Frame(); }
+void UpdatePerformanceOverlay() { if (performance) performance->Update(); }
 
 void HudClear() {
   if (hud) hud->Clear();

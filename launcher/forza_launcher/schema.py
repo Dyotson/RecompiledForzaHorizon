@@ -49,6 +49,9 @@ def add(*a, **k):
 add("frame_rate", "Frame rate", "Display", "fps", 30,
     "30 is the console's rate; 60 to 240 (60, 120, 144, ...) run the game faster. Physics and "
     "race timing keep their speed (docs/framerate.md).", "Frame rate")
+add("forza_performance_overlay", "Performance overlay", "Display", "choice", "off",
+    "Measured game FPS, optionally with a frame-time graph. Does not count UI redraws.",
+    "Frame rate", choices=[("off", "Off"), ("fps", "FPS"), ("graph", "FPS + frame-time graph")])
 add("vsync", "Vertical sync", "Display", "bool", True,
     "Wait for the display's refresh. Turn off only for testing.", "Frame rate")
 add("video_mode_refresh_rate", "Guest refresh rate (Hz)", "Display", "float", 0.0,
@@ -116,10 +119,10 @@ add("present_effect", "Upscaling filter", "Display", "choice", "bilinear",
     restart=True, legacy={"fsr2": "fsr"})
 add("fsr3_mode", "FSR 3 quality", "Display", "choice", "performance",
     "The scene's input size for AMD FSR 3: Quality 1/1.5 of the output per axis, Balanced 1/1.7, "
-    "Performance 1/2 (720p for 1440p), Native AA the output size; never below the game's native 1280x720, "
+    "Performance 1/2 (720p for 1440p); never below the game's native 1280x720, "
     "so at a 1080p output Balanced and Performance also use 720p. Only with the AMD FSR 3 filter.",
     "AMD FSR 3", choices=[("quality", "Quality"), ("balanced", "Balanced"),
-                          ("performance", "Performance"), ("native", "Native AA")], restart=True)
+                          ("performance", "Performance")], restart=True)
 add("fsr3_output_resolution", "FSR 3 output resolution", "Display", "choice", "1440p",
     "The reconstructed picture and native UI resolution for AMD FSR 3.", "AMD FSR 3",
     choices=[("1080p", "1920 x 1080"), ("1440p", "2560 x 1440"), ("4k", "3840 x 2160 (4K)")],
@@ -127,17 +130,24 @@ add("fsr3_output_resolution", "FSR 3 output resolution", "Display", "choice", "1
 if IS_WINDOWS:
     add("fh1_upscaler", "NVIDIA DLSS", "Display", "choice", "off",
         "Reconstruct the scene with NVIDIA's recommended input size for the selected mode, "
-        "or use output-sized input with DLAA. Menus, HUD and car labels stay at output resolution. "
+        "with integrated temporal anti-aliasing. Menus, HUD and car labels stay at output resolution. "
         "The scene uses an integer emulator scale, then resamples between scales; these modes may cost extra. "
         "Requires an RTX GPU; the NVIDIA runtime downloads automatically on first use.",
         "NVIDIA DLSS", choices=[("off", "Off"), ("quality", "Quality"), ("balanced", "Balanced"),
-                                ("dlss", "Performance"), ("dlaa", "DLAA (native input)")],
+                                ("dlss", "Performance")],
         platform="windows", restart=True)
     add("fh1_output_resolution", "Output resolution", "Display", "choice", "1440p",
         "The reconstructed picture and native UI resolution. Restart the game after changing it.",
         "NVIDIA DLSS", choices=[("1080p", "1920 x 1080"), ("1440p", "2560 x 1440"),
                                 ("4k", "3840 x 2160 (4K)")], platform="windows", restart=True)
 
+add("forza_antialiasing", "Anti-aliasing", "Display", "choice", "game",
+    "Game default preserves guest MSAA. SMAA 1x is spatial and needs no NVIDIA runtime. "
+    "DLAA and FSR Native AA are temporal at output resolution. A separate method is available "
+    "only with upscaling off; filtering occurs before the native HUD.", "Picture",
+    choices=[("game", "Game default (MSAA)"), ("smaa", "SMAA 1x"),
+             *([("dlaa", "NVIDIA DLAA")] if IS_WINDOWS else []),
+             ("fsr3_native", "FSR Native AA (TAA)")], restart=True)
 add("swap_post_effect", "Anti-aliasing post effect", "Display", "choice", "none",
     "FXAA on the final image.", "Picture",
     choices=[("none", "None"), ("fxaa", "FXAA"), ("fxaa_extreme", "FXAA extreme")], restart=True)
@@ -147,8 +157,8 @@ add("present_cas_additional_sharpness", "CAS extra sharpness", "Display", "float
     "0 to 1, for the CAS filter.", "Picture", lo=0, hi=1, step=0.05)
 add("present_dither", "Output dithering", "Display", "bool", False,
     "Dither the final image to hide banding.", "Picture", restart=True)
-add("native_2x_msaa", "Native 2x MSAA", "Display", "bool", True,
-    "Use the GPU's own 2x multisampling.", "Picture")
+add("native_2x_msaa", "Native 2x MSAA implementation", "Display", "bool", True,
+    "Implement guest-requested 2x targets using native GPU multisampling. This does not force MSAA or choose the game's sample count.", "Picture")
 if IS_WINDOWS:
     add("gpu_backend", "Graphics API", "Display", "choice", "vulkan",
         "Vulkan includes this project's fixes and is recommended; Direct3D 12 is the SDK's own and "

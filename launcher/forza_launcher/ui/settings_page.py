@@ -236,7 +236,7 @@ class SettingsPage(QWidget):
     # --- plumbing -------------------------------------------------------------------
     def set_value(self, key, value):
         self.cfg.settings[key] = schema.coerce(schema.BY_KEY[key], value)
-        if key in ("fh1_upscaler", "fh1_output_resolution") and dlss.enabled(self.cfg):
+        if key in ("fh1_upscaler", "fh1_output_resolution", "forza_antialiasing") and dlss.enabled(self.cfg):
             resolution, _, _, scale = dlss.output_settings(self.cfg)
             for dep, fixed in (("gpu_backend", "vulkan"), ("resolution", resolution), ("resolution_scale", scale)):
                 self.cfg.settings[dep] = fixed
@@ -249,12 +249,29 @@ class SettingsPage(QWidget):
                     else:
                         control.setCurrentIndex(control.findData(fixed))
                     control.blockSignals(False)
+        # Scene reconstruction already includes AA. Keep the selectors exclusive.
+        if key in ("fh1_upscaler", "present_effect") and value not in ("off", "bilinear", "fsr", "cas"):
+            self.cfg.settings["forza_antialiasing"] = "game"
+            row = self.rows.get("forza_antialiasing")
+            if row:
+                row.control.blockSignals(True)
+                row.control.setCurrentIndex(row.control.findData("game"))
+                row.control.blockSignals(False)
         if key == "forza_ultrawide" and value and "gpu_backend" in self.rows:
             self.cfg.settings["gpu_backend"] = "vulkan"
             control = self.rows["gpu_backend"].control
             control.blockSignals(True)
             control.setCurrentIndex(control.findData("vulkan"))
             control.blockSignals(False)
+        scene_aa = self.cfg.settings.get("forza_antialiasing", "game") != "game"
+        scaling = self.cfg.settings.get("fh1_upscaler", "off") != "off" or self.cfg.settings.get("present_effect") == "fsr3"
+        if scene_aa or scaling:
+            self.cfg.settings["swap_post_effect"] = "none"
+            row = self.rows.get("swap_post_effect")
+            if row:
+                row.control.blockSignals(True)
+                row.control.setCurrentIndex(row.control.findData("none"))
+                row.control.blockSignals(False)
         self._apply_dependencies()
         self.touched()
 
@@ -289,6 +306,22 @@ class SettingsPage(QWidget):
         for key in ("resolution", "resolution_scale"):
             if key in self.rows and temporal:
                 self.rows[key].control.setEnabled(False)
+        aa_row = self.rows.get("forza_antialiasing")
+        if aa_row:
+            scaling = self.cfg.settings.get("fh1_upscaler", "off") != "off" or self.cfg.settings.get("present_effect") == "fsr3"
+            supported = self.cfg.settings.get("gpu_backend", "vulkan") == "vulkan" and not self.cfg.settings.get("forza_ultrawide")
+            aa_row.control.setEnabled(not scaling and supported)
+            model = aa_row.control.model()
+            for index in range(aa_row.control.count()):
+                item = model.item(index)
+                if item:
+                    item.setEnabled(aa_row.control.itemData(index) != "dlaa" or self.cfg.gpu_vendor() == gpu.NVIDIA)
+            aa_row.control.setToolTip("Upscaling includes anti-aliasing; turn it off to choose a separate method." if scaling else
+                                     "Separate scene AA currently requires Vulkan and standard 16:9 output." if not supported else
+                                     schema.BY_KEY["forza_antialiasing"].help)
+        if "swap_post_effect" in self.rows:
+            self.rows["swap_post_effect"].control.setEnabled(
+                not active and not temporal and self.cfg.settings.get("forza_antialiasing", "game") == "game")
         self._refresh_gpu_warnings()
         for key in ("gpu_backend", "resolution_scale"):
             if key in self.rows:

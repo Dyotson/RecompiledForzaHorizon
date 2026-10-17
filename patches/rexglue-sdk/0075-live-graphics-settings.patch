@@ -1,0 +1,450 @@
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -696,6 +696,11 @@
+   VkPipelineLayout fh1_resolve_layout_ = VK_NULL_HANDLE;
+   bool Fh1SynchronizeResolve(uint32_t address, uint32_t length);
+   void Fh1SelectNativeHud(bool native_hud);
++  bool Fh1CreateRenderCaches(uint32_t scale_x, uint32_t scale_y);
++  void Fh1ApplyGraphicsRequest();
++  std::string fh1_last_graphics_request_;
++  std::filesystem::path fh1_storage_root_;
++  uint32_t fh1_storage_title_ = 0;
+ 
+   VkDescriptorPool shared_memory_and_edram_descriptor_pool_ = VK_NULL_HANDLE;
+   VkDescriptorSet shared_memory_and_edram_descriptor_set_;
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -160,6 +160,14 @@
+         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+         while (vsync_worker_running_) {
+           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
++          kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
++          const double new_hz = std::max(1.0, double(float(video_mode.refresh_rate)));
++          if (new_hz != refresh_rate_hz) {
++            refresh_rate_hz = new_hz;
++            vsync_interval_ticks = std::max(uint64_t(1),
++                uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
++            last_frame_time = current_time;
++          }
+           uint64_t interval_ticks =
+               REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
+           while (current_time - last_frame_time >= interval_ticks) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -17,6 +17,7 @@
+ #include <cstring>
+ #include <iterator>
+ #include <fstream>
++#include <sstream>
+ #include <filesystem>
+ #include <deque>
+ #include <unordered_map>
+@@ -70,6 +71,13 @@
+ REXCVAR_DEFINE_BOOL(fh1_scene_720p_native_hud, false, "GPU/Vulkan",
+                     "Experimental FH1: 720p world with a separate native 1440p HUD")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// One immutable request prevents the GPU observing half of a settings change.
++REXCVAR_DEFINE_UINT32(fh1_native_scene_scale, 1, "GPU/Vulkan", "Native scene scale with an independent HUD")
++    .range(1, 3).lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(fh1_graphics_request, "", "GPU/Vulkan", "FH1 live graphics request")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(fh1_graphics_result, "", "GPU/Vulkan", "FH1 live graphics result")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_STRING(fh1_upscaler, "off", "GPU/Vulkan", "FH1 scene reconstruction: off; NVIDIA DLSS quality, balanced, performance (dlss), dlaa; AMD FSR 3 fsr3_quality, fsr3_balanced, fsr3_performance, fsr3_native").lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_UINT32(fh1_output_width, 2560, "GPU/Vulkan", "FH1 reconstruction output width").lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_UINT32(fh1_output_height, 1440, "GPU/Vulkan", "FH1 reconstruction output height")
+@@ -781,11 +789,14 @@
+ 
+ void VulkanCommandProcessor::InitializeShaderStorage(const std::filesystem::path& cache_root,
+                                                      uint32_t title_id, bool blocking) {
++  fh1_storage_root_ = cache_root;
++  fh1_storage_title_ = title_id;
+   CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);
+-  const auto storage_root = fh1_dlss_ ? cache_root / ("fh1-output-v6-" +
+-      std::to_string(fh1_dlss_->output_width()) + "x" + std::to_string(fh1_dlss_->output_height()) +
+-      "-" + std::to_string(fh1_dlss_->width()) + "x" + std::to_string(fh1_dlss_->height())) : cache_root;
+-  pipeline_cache_->InitializeShaderStorage(fh1_dlss_ ? storage_root / "ui" : storage_root, title_id, blocking);
++  const auto storage_root = fh1_split_enabled_ ? cache_root / ("fh1-live-v1-" +
++      std::to_string(REXCVAR_GET(fh1_output_width)) + "x" + std::to_string(REXCVAR_GET(fh1_output_height)) +
++      "-" + std::to_string(fh1_other_render_targets_->draw_resolution_scale_x()) + "x" +
++      std::to_string(fh1_other_render_targets_->draw_resolution_scale_y())) : cache_root;
++  pipeline_cache_->InitializeShaderStorage(fh1_split_enabled_ ? storage_root / "ui" : storage_root, title_id, blocking);
+   if (fh1_other_pipelines_) fh1_other_pipelines_->InitializeShaderStorage(
+       storage_root / "scene", title_id, blocking);
+ }
+@@ -1264,83 +1275,7 @@
+   }
+ 
+ 
+-  // Requires the transient descriptor set layouts.
+-  texture_cache_ =
+-      VulkanTextureCache::Create(*register_file_, *shared_memory_, draw_resolution_scale_x,
+-                                 draw_resolution_scale_y, *this, guest_shader_pipeline_stages_);
+-  if (!texture_cache_) {
+-    REXGPU_ERROR("Failed to initialize the texture cache");
+-    return false;
+-  }
+-
+-  if (REXCVAR_GET(fh1_scene_720p_native_hud) || REXCVAR_GET(fh1_upscaler) != "off") {
+-    const bool fh1_fsr3 = REXCVAR_GET(fh1_upscaler).rfind("fsr3_", 0) == 0;
+-    const std::string fh1_backend = fh1_fsr3 ? "AMD FSR 3" : "NVIDIA DLSS";
+-    const uint32_t output_width = REXCVAR_GET(fh1_output_width);
+-    const uint32_t output_height = REXCVAR_GET(fh1_output_height);
+-    const uint32_t output_scale = (output_height + 719) / 720;
+-    const bool supported_output = (output_width == 1920 && output_height == 1080) ||
+-        (output_width == 2560 && output_height == 1440) || (output_width == 3840 && output_height == 2160);
+-    const bool compatible = supported_output && draw_resolution_scale_x == output_scale &&
+-        draw_resolution_scale_y == output_scale &&
+-        render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets;
+-    if (!compatible) {
+-      Fh1Dlss::ReportStatus("error: " + fh1_backend + " output/scale or render-target path is incompatible; continuing with native rendering.");
+-      REXGPU_WARN("FH1 reconstruction disabled: incompatible output, scale or render-target path; using native rendering");
+-    } else {
+-      bool ready = true;
+-      uint32_t scene_width = 1280, scene_height = 720;
+-      if (REXCVAR_GET(fh1_upscaler) != "off") {
+-        fh1_dlss_ = std::make_unique<Fh1Dlss>(GetVulkanDevice(), output_width, output_height,
+-            REXCVAR_GET(fh1_upscaler));
+-        ready = fh1_dlss_->Initialize();
+-        if (ready) { scene_width = fh1_dlss_->width(); scene_height = fh1_dlss_->height(); }
+-      }
+-      // Guest EDRAM resolves require an integer scene scale. Use a ceiling
+-      // raster and resample into NGX's exact recommended input dimensions.
+-      // Do not claim that fractional modes shade only the NGX input pixels.
+-      const uint32_t scene_scale = std::max((scene_width + 1279) / 1280, (scene_height + 719) / 720);
+-      if (ready) {
+-        fh1_split_enabled_ = true;
+-        render_target_cache_->SetRasterSize(output_width, output_height);
+-        fh1_other_render_targets_ = std::make_unique<VulkanRenderTargetCache>(
+-            *register_file_, *memory_, scene_scale, scene_scale, *this);
+-        fh1_other_render_targets_->SetRasterSize(1280 * scene_scale, 720 * scene_scale);
+-        ready = fh1_other_render_targets_->Initialize(shared_memory_binding_count);
+-        if (fh1_dlss_) fh1_dlss_->SetSceneBacking(scene_scale);
+-      }
+-      if (ready && scene_scale != output_scale) {
+-        fh1_other_textures_ = VulkanTextureCache::Create(*register_file_, *shared_memory_,
+-            scene_scale, scene_scale, *this, guest_shader_pipeline_stages_);
+-        ready = bool(fh1_other_textures_);
+-      }
+-      if (ready) {
+-        fh1_other_pipelines_ = std::make_unique<VulkanPipelineCache>(
+-            *this, *register_file_, *fh1_other_render_targets_, guest_shader_vertex_stages_);
+-        ready = fh1_other_pipelines_->Initialize();
+-      }
+-      if (!ready) {
+-        Fh1Dlss::ReportStatus("error: " + fh1_backend + " initialization failed; continuing with native rendering. See the game log.");
+-        REXGPU_WARN("{} unavailable: retaining native rendering", fh1_backend);
+-        fh1_dlss_.reset();
+-        fh1_other_pipelines_.reset();
+-        fh1_other_render_targets_.reset();
+-        fh1_other_textures_.reset();
+-        fh1_split_enabled_ = false;
+-        render_target_cache_->SetRasterSize(1280 * draw_resolution_scale_x, 720 * draw_resolution_scale_y);
+-      } else {
+-        REXGPU_INFO("FH1 split rendering initialized: scene={}x{}, UI={}x{}; independent pipeline caches/translators", 1280 * scene_scale, 720 * scene_scale, output_width, output_height);
+-        REXGPU_INFO("FH1 reconstruction input={}x{}; raster={}x{}", scene_width, scene_height, 1280 * scene_scale, 720 * scene_scale);
+-      }
+-    }
+-  }
+-
+-  pipeline_cache_ = std::make_unique<VulkanPipelineCache>(
+-      *this, *register_file_, *render_target_cache_, guest_shader_vertex_stages_);
+-  if (!pipeline_cache_->Initialize()) {
+-    REXGPU_ERROR("Failed to initialize the graphics pipeline cache");
+-    return false;
+-  }
++  if (!Fh1CreateRenderCaches(draw_resolution_scale_x, draw_resolution_scale_y)) return false;
+ 
+   // Shared memory and EDRAM common bindings.
+   VkDescriptorPoolSize descriptor_pool_sizes[1];
+@@ -2869,9 +2804,9 @@
+     guest_output_width = std::min(guest_output_width, uint32_t(REXCVAR_GET(forza_native_width)));
+     guest_output_height = std::min(guest_output_height, uint32_t(REXCVAR_GET(forza_native_height)));
+   }
+-  if (fh1_dlss_) {
+-    guest_output_width = fh1_dlss_->output_width();
+-    guest_output_height = fh1_dlss_->output_height();
++  if (fh1_split_enabled_) {
++    guest_output_width = REXCVAR_GET(fh1_output_width);
++    guest_output_height = REXCVAR_GET(fh1_output_height);
+   }
+   bool swap_source_scaled = frontbuffer_width_unscaled && frontbuffer_height_unscaled &&
+                             (frontbuffer_width_scaled != frontbuffer_width_unscaled ||
+@@ -4188,6 +4123,223 @@
+   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+ }
+ 
++bool VulkanCommandProcessor::Fh1CreateRenderCaches(uint32_t draw_resolution_scale_x,
++                                                       uint32_t draw_resolution_scale_y) {
++  const auto& props = GetVulkanDevice()->properties();
++  const uint32_t shared_memory_binding_count = UINT32_C(1) <<
++      SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(props.maxStorageBufferRange);
++  if (!render_target_cache_) {
++    render_target_cache_ = std::make_unique<VulkanRenderTargetCache>(
++        *register_file_, *memory_, draw_resolution_scale_x, draw_resolution_scale_y, *this);
++    if (!render_target_cache_->Initialize(shared_memory_binding_count)) return false;
++  }
++  // Requires the transient descriptor set layouts.
++  texture_cache_ =
++      VulkanTextureCache::Create(*register_file_, *shared_memory_, draw_resolution_scale_x,
++                                 draw_resolution_scale_y, *this, guest_shader_pipeline_stages_);
++  if (!texture_cache_) {
++    REXGPU_ERROR("Failed to initialize the texture cache");
++    return false;
++  }
++
++  if (REXCVAR_GET(fh1_scene_720p_native_hud) || REXCVAR_GET(fh1_upscaler) != "off") {
++    const bool fh1_fsr3 = REXCVAR_GET(fh1_upscaler).rfind("fsr3_", 0) == 0;
++    const std::string fh1_backend = fh1_fsr3 ? "AMD FSR 3" : "NVIDIA DLSS";
++    const uint32_t output_width = REXCVAR_GET(fh1_output_width);
++    const uint32_t output_height = REXCVAR_GET(fh1_output_height);
++    const uint32_t output_scale = (output_height + 719) / 720;
++    const bool supported_output = (output_width == 1920 && output_height == 1080) ||
++        (output_width == 2560 && output_height == 1440) || (output_width == 3840 && output_height == 2160);
++    const bool compatible = supported_output && draw_resolution_scale_x == output_scale &&
++        draw_resolution_scale_y == output_scale &&
++        render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets;
++    if (!compatible) {
++      Fh1Dlss::ReportStatus("error: " + fh1_backend + " output/scale or render-target path is incompatible; continuing with native rendering.");
++      REXGPU_WARN("FH1 reconstruction disabled: incompatible output, scale or render-target path; using native rendering");
++    } else {
++      bool ready = true;
++      uint32_t scene_width = 1280 * REXCVAR_GET(fh1_native_scene_scale),
++          scene_height = 720 * REXCVAR_GET(fh1_native_scene_scale);
++      if (REXCVAR_GET(fh1_upscaler) != "off") {
++        fh1_dlss_ = std::make_unique<Fh1Dlss>(GetVulkanDevice(), output_width, output_height,
++            REXCVAR_GET(fh1_upscaler));
++        ready = fh1_dlss_->Initialize();
++        if (ready) { scene_width = fh1_dlss_->width(); scene_height = fh1_dlss_->height(); }
++      }
++      // Guest EDRAM resolves require an integer scene scale. Use a ceiling
++      // raster and resample into NGX's exact recommended input dimensions.
++      // Do not claim that fractional modes shade only the NGX input pixels.
++      const uint32_t scene_scale = std::max((scene_width + 1279) / 1280, (scene_height + 719) / 720);
++      if (ready) {
++        fh1_split_enabled_ = true;
++        render_target_cache_->SetRasterSize(output_width, output_height);
++        fh1_other_render_targets_ = std::make_unique<VulkanRenderTargetCache>(
++            *register_file_, *memory_, scene_scale, scene_scale, *this);
++        fh1_other_render_targets_->SetRasterSize(1280 * scene_scale, 720 * scene_scale);
++        ready = fh1_other_render_targets_->Initialize(shared_memory_binding_count);
++        if (fh1_dlss_) fh1_dlss_->SetSceneBacking(scene_scale);
++      }
++      if (ready && scene_scale != output_scale) {
++        fh1_other_textures_ = VulkanTextureCache::Create(*register_file_, *shared_memory_,
++            scene_scale, scene_scale, *this, guest_shader_pipeline_stages_);
++        ready = bool(fh1_other_textures_);
++      }
++      if (ready) {
++        fh1_other_pipelines_ = std::make_unique<VulkanPipelineCache>(
++            *this, *register_file_, *fh1_other_render_targets_, guest_shader_vertex_stages_);
++        ready = fh1_other_pipelines_->Initialize();
++      }
++      if (!ready) {
++        Fh1Dlss::ReportStatus("error: " + fh1_backend + " initialization failed; continuing with native rendering. See the game log.");
++        REXGPU_WARN("{} unavailable: retaining native rendering", fh1_backend);
++        fh1_dlss_.reset();
++        fh1_other_pipelines_.reset();
++        fh1_other_render_targets_.reset();
++        fh1_other_textures_.reset();
++        fh1_split_enabled_ = false;
++        render_target_cache_->SetRasterSize(1280 * draw_resolution_scale_x, 720 * draw_resolution_scale_y);
++      } else {
++        REXGPU_INFO("FH1 split rendering initialized: scene={}x{}, UI={}x{}; independent pipeline caches/translators", 1280 * scene_scale, 720 * scene_scale, output_width, output_height);
++        REXGPU_INFO("FH1 reconstruction input={}x{}; raster={}x{}", scene_width, scene_height, 1280 * scene_scale, 720 * scene_scale);
++      }
++    }
++  }
++
++  pipeline_cache_ = std::make_unique<VulkanPipelineCache>(
++      *this, *register_file_, *render_target_cache_, guest_shader_vertex_stages_);
++  if (!pipeline_cache_->Initialize()) {
++    REXGPU_ERROR("Failed to initialize the graphics pipeline cache");
++    return false;
++  }
++
++  return true;
++}
++
++void VulkanCommandProcessor::Fh1ApplyGraphicsRequest() {
++  const std::string request = rex::cvar::GetFlagByName("fh1_graphics_request");
++  if (request.empty() || request == fh1_last_graphics_request_) return;
++  fh1_last_graphics_request_ = request;
++  auto result = [&](const std::string& text) {
++    rex::cvar::SetFlagByName("fh1_graphics_result", request + "|" + text);
++  };
++  std::istringstream input(request);
++  uint64_t id;
++  uint32_t width, height, scene_scale;
++  std::string mode, extra;
++  if (!(input >> id >> width >> height >> scene_scale >> mode) || (input >> extra) ||
++      !((width == 1920 && height == 1080) || (width == 2560 && height == 1440) ||
++        (width == 3840 && height == 2160)) || scene_scale < 1 || scene_scale > 3 ||
++      !(mode == "off" || mode == "quality" || mode == "balanced" || mode == "dlss" ||
++        mode == "dlaa" || mode == "fsr3_quality" || mode == "fsr3_balanced" ||
++        mode == "fsr3_performance" || mode == "fsr3_native")) {
++    result("error: unsupported graphics settings");
++    return;
++  }
++  if (width == REXCVAR_GET(fh1_output_width) && height == REXCVAR_GET(fh1_output_height) &&
++      mode == REXCVAR_GET(fh1_upscaler) && fh1_split_enabled_ &&
++      (mode != "off" || scene_scale == REXCVAR_GET(fh1_native_scene_scale))) {
++    result("ok");
++    return;
++  }
++  if (render_target_cache_->GetPath() != RenderTargetCache::Path::kHostRenderTargets ||
++      REXCVAR_GET(forza_native_width) > 0) {
++    result("error: live graphics currently requires standard 16:9 host rendering");
++    return;
++  }
++  if (!AwaitAllQueueOperationsCompletion()) {
++    result("error: could not finish pending GPU work");
++    return;
++  }
++  // At a closed frame, all submissions are complete and no new draws can refer
++  // to these caches. Keep the old caches until the replacements initialize.
++  Fh1SelectNativeHud(true);
++  auto old_rt = std::move(render_target_cache_);
++  auto old_textures = std::move(texture_cache_);
++  auto old_pipelines = std::move(pipeline_cache_);
++  auto old_scene_rt = std::move(fh1_other_render_targets_);
++  auto old_scene_textures = std::move(fh1_other_textures_);
++  auto old_scene_pipelines = std::move(fh1_other_pipelines_);
++  const bool old_split = fh1_split_enabled_;
++  const bool had_dlss = bool(fh1_dlss_);
++  const uint32_t old_backing = had_dlss ?
++      std::max((fh1_dlss_->width() + 1279) / 1280, (fh1_dlss_->height() + 719) / 720) : 1;
++  const char* names[] = {"fh1_upscaler", "fh1_output_width", "fh1_output_height",
++      "fh1_scene_720p_native_hud", "fh1_native_scene_scale", "resolution_scale",
++      "draw_resolution_scale_x", "draw_resolution_scale_y"};
++  std::vector<std::string> previous;
++  for (auto name : names) previous.push_back(rex::cvar::GetFlagByName(name));
++  // NGX initialization/shutdown is per device. Release the old feature before
++  // initializing a new mode; do not shut down NGX underneath the new feature.
++  fh1_dlss_.reset();
++  fh1_split_enabled_ = false;
++  const uint32_t output_scale = (height + 719) / 720;
++  rex::cvar::SetFlagByName("fh1_upscaler", mode);
++  rex::cvar::SetFlagByName("fh1_output_width", std::to_string(width));
++  rex::cvar::SetFlagByName("fh1_output_height", std::to_string(height));
++  rex::cvar::SetFlagByName("fh1_scene_720p_native_hud", "true");
++  rex::cvar::SetFlagByName("fh1_native_scene_scale", std::to_string(scene_scale));
++  rex::cvar::SetFlagByName("resolution_scale", std::to_string(output_scale));
++  rex::cvar::SetFlagByName("draw_resolution_scale_x", "1");
++  rex::cvar::SetFlagByName("draw_resolution_scale_y", "1");
++  const bool ready = Fh1CreateRenderCaches(output_scale, output_scale) &&
++      fh1_split_enabled_ && (mode == "off" || fh1_dlss_);
++  if (!ready) {
++    fh1_dlss_.reset();
++    fh1_other_pipelines_.reset();
++    pipeline_cache_.reset();
++    fh1_other_textures_.reset();
++    texture_cache_.reset();
++    fh1_other_render_targets_.reset();
++    render_target_cache_.reset();
++    for (size_t i = 0; i < previous.size(); ++i)
++      rex::cvar::SetFlagByName(names[i], previous[i]);
++    render_target_cache_ = std::move(old_rt);
++    texture_cache_ = std::move(old_textures);
++    pipeline_cache_ = std::move(old_pipelines);
++    fh1_other_render_targets_ = std::move(old_scene_rt);
++    fh1_other_textures_ = std::move(old_scene_textures);
++    fh1_other_pipelines_ = std::move(old_scene_pipelines);
++    fh1_split_enabled_ = old_split;
++    if (had_dlss) {
++      fh1_dlss_ = std::make_unique<Fh1Dlss>(GetVulkanDevice(), std::stoul(previous[1]),
++          std::stoul(previous[2]), previous[0]);
++      if (!fh1_dlss_->Initialize()) {
++        fh1_dlss_.reset();
++        result("error: reconstruction and recovery failed; return to native rendering");
++        return;
++      }
++      fh1_dlss_->SetSceneBacking(old_backing);
++    }
++    result("error: initialization failed; previous settings restored");
++    return;
++  }
++  // Active shader pointers belong to the old cache even if the guest doesn't
++  // rebind them next frame. Clone their microcode before releasing that cache.
++  if (active_vertex_shader_)
++    active_vertex_shader_ = pipeline_cache_->LoadShaderForDraw(*active_vertex_shader_);
++  if (active_pixel_shader_)
++    active_pixel_shader_ = pipeline_cache_->LoadShaderForDraw(*active_pixel_shader_);
++  old_scene_pipelines.reset();
++  old_pipelines.reset();
++  old_scene_textures.reset();
++  old_textures.reset();
++  old_scene_rt.reset();
++  old_rt.reset();
++  const auto& f = GetVulkanDevice()->functions();
++  for (auto& framebuffer : swap_framebuffers_)
++    ui::vulkan::util::DestroyAndNullHandle(f.vkDestroyFramebuffer,
++        GetVulkanDevice()->device(), framebuffer.framebuffer);
++  ClearTransientDescriptorPools();
++  current_constant_buffers_up_to_date_ = 0;
++  current_graphics_descriptor_set_values_up_to_date_ = 0;
++  Fh1InvalidateBindings();
++  if (!fh1_storage_root_.empty())
++    InitializeShaderStorage(fh1_storage_root_, fh1_storage_title_, false);
++  REXGPU_INFO("FH1 live graphics applied: {}x{}, mode={}, native scene scale={}",
++              width, height, mode, scene_scale);
++  result("ok");
++}
++
+ void VulkanCommandProcessor::Fh1SelectNativeHud(bool native_hud) {
+   if (!fh1_other_render_targets_ || native_hud == fh1_native_hud_active_) return;
+   EndRenderPass();
+@@ -4527,7 +4679,7 @@
+     if (frame_current_ % 120 == 0)
+       REXGPU_INFO("FH1 frame {}: world={}x{}, HUD={}x{}, scene transferred before UI", frame_current_,
+           1280 * fh1_other_render_targets_->draw_resolution_scale_x(), 720 * fh1_other_render_targets_->draw_resolution_scale_y(),
+-          fh1_dlss_ ? fh1_dlss_->output_width() : 2560, fh1_dlss_ ? fh1_dlss_->output_height() : 1440);
++          REXCVAR_GET(fh1_output_width), REXCVAR_GET(fh1_output_height));
+   }
+ 
+   // Create the pipeline (for this, need the render pass from the render target
+@@ -6508,6 +6660,7 @@
+     }
+   }
+ 
++  if (is_closing_frame) Fh1ApplyGraphicsRequest();
+   return true;
+ }
+ 
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -6277,10 +6277,10 @@
+   command_processor_.SubmitBarriers(true);
+   VkImageBlit region{};
+   region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+-  region.srcOffsets[1] = {int32_t(width * scene.draw_resolution_scale_x()),
+-                          int32_t(height * scene.draw_resolution_scale_y()), 1};
+-  region.dstOffsets[1] = {int32_t(width * draw_resolution_scale_x()),
+-                          int32_t(height * draw_resolution_scale_y()), 1};
++  region.srcOffsets[1] = {int32_t(width * scene.draw_resolution_scale_x() * scene.raster_scale_x()),
++                          int32_t(height * scene.draw_resolution_scale_y() * scene.raster_scale_y()), 1};
++  region.dstOffsets[1] = {int32_t(width * draw_resolution_scale_x() * raster_scale_x()),
++                          int32_t(height * draw_resolution_scale_y() * raster_scale_y()), 1};
+   if (command_processor_.fh1_dlss()) {
+     command_processor_.deferred_command_buffer().CmdFh1Dlss(
+         command_processor_.fh1_dlss(), src->image(), dst->image());
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -170,10 +170,8 @@
+   request_promoted_extension("VK_" #name, major, minor, &ext_##major##_##minor##_##name);
+ 
+   bool ext_KHR_portability_subset = false;
+-  const auto reconstruction = rex::cvar::GetFlagByName("fh1_upscaler");
+-  const bool dlss_requested = with_gpu_emulation && properties.vendorID == 0x10DE &&
+-      (reconstruction == "dlss" || reconstruction == "dlaa" || reconstruction == "quality" ||
+-       reconstruction == "balanced" || reconstruction == "performance");
++  // A session may enable DLSS later from the graphics menu.
++  const bool dlss_requested = with_gpu_emulation && properties.vendorID == 0x10DE;
+   bool ext_KHR_push_descriptor = false;
+   if (dlss_requested) requested_extensions.emplace("VK_KHR_push_descriptor", &ext_KHR_push_descriptor);
+   bool ext_NVX_binary_import = false, ext_NVX_image_view_handle = false;

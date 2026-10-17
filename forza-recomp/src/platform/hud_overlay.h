@@ -29,6 +29,10 @@ namespace forza {
 void InstallHud(rex::ui::ImGuiDrawer* drawer, rex::ui::WindowedAppContext& app_context,
                 rex::ui::Window* window);
 
+// Passive performance overlay: Off / FPS / FPS with frame-time history.
+void PerformanceOverlayFrame();  // called only for guest VdSwap, any thread
+void UpdatePerformanceOverlay(); // checks its hot cvar, any thread
+
 constexpr char kHudHighlight = '\x01';
 
 // Shows `title` (first line, highlighted) and `body` for `seconds`, replacing what shows.

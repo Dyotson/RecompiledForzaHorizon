@@ -26,6 +26,7 @@
 // FORZA_FRAMETIME_LOG=1 logs the dt statistics every 10 s, FORZA_FRAMETIME_CSV each frame.
 
 #include "frame_time.h"
+#include "../platform/graphics_menu.h"
 
 #include "../platform/guest_addr.h"
 #include "../platform/guest_memory.h"
@@ -67,7 +68,7 @@ int EnvInt(const char* name, int fallback) {
 bool PreciseFrameTime() {
   static const bool on = [] {
     const char* v = std::getenv("FORZA_FRAME_TIME");
-    return REXCVAR_GET(frame_rate) > 30 && !(v && std::strcmp(v, "game") == 0);
+    return !(v && std::strcmp(v, "game") == 0);
   }();
   return on;
 }
@@ -97,7 +98,7 @@ double GuestVblankHz() {
 
 uint64_t VblankIntervalTicks() {
   // As the SDK's VSync thread computes it (graphics_system.cpp, VdQueryVideoMode's float).
-  static const uint64_t ticks = [] {
+  const uint64_t ticks = [] {
     const double hz = double(float(GuestVblankHz()));
     return std::max<uint64_t>(1, uint64_t(double(rex::chrono::Clock::guest_tick_frequency()) / hz));
   }();
@@ -256,6 +257,9 @@ bool OwnCarPosition(uint8_t* base, float& x, float& z) {
 bool FrameTime(uint8_t* base, uint32_t game_ms, double& dt_out) {
   static uint64_t prev = 0, seen_count = 0;
   static Stats stats;
+  static int last_rate = 0;
+  const int rate = REXCVAR_GET(frame_rate);
+  if (rate != last_rate) { prev = 0; seen_count = 0; last_rate = rate; }
   const uint64_t now = rex::chrono::Clock::QueryGuestTickCount();
   const uint64_t freq = rex::chrono::Clock::guest_tick_frequency();
   uint64_t count, actual, nominal;
@@ -301,8 +305,14 @@ bool FrameTime(uint8_t* base, uint32_t game_ms, double& dt_out) {
 
 namespace forza::frame_time {
 
+void ResetRenderTiming() {
+  std::lock_guard lock(render.mutex);
+  render.last_tick = 0;
+  render.interval_ema = 0;
+}
+
 int VblanksPerFrame() {
-  static const int n = [] {
+  const int n = [] {
     const int fps = REXCVAR_GET(frame_rate);
     if (fps <= 30) return 2;
     const int forced = EnvInt("FORZA_VBLANK_DIVIDER", 0);  // for comparisons
@@ -356,7 +366,9 @@ extern "C" REX_FUNC(sub_8247C168) {
   const uint32_t lr = uint32_t(ctx.lr);
   const uint32_t game_ms = ctx.r30.u32;
   __imp__sub_8247C168(ctx, base);
-  if (lr != kFrameTimeCallReturn || REXCVAR_GET(frame_rate) <= 30) return;
+  if (lr != kFrameTimeCallReturn) return;
+  forza::graphics_menu::Tick(ctx, base);
+  if (REXCVAR_GET(frame_rate) <= 30) return;
   double dt;
   const bool timed = FrameTime(base, game_ms, dt);
   if (RenderSyncEnabled()) WaitForRender();

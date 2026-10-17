@@ -126,3 +126,27 @@ patch also turns on SDL's haptic subsystem in `thirdparty/CMakeLists.txt` (it wa
 driver ignores wheels the wheel driver takes. Local builds need `libudev.h` (Homebrew `systemd`, added to
 `tools/build_rexglue_sdk.sh`), otherwise SDL is built without udev and sees no joystick at all.
 Test: a uinput virtual wheel; see [Playing](playing.md#racing-wheels-issue-4).
+
+0075 adds the native graphics menu's Vulkan Apply transaction. A complete request
+is consumed at a closed frame, after pending submissions finish. Scale-dependent
+render targets, textures, reconstruction and pipelines are replaced together;
+the previous configuration is restored if initialization fails. Active shader
+microcode is transferred before releasing the old cache, and shader storage is
+partitioned by output and scene scale. Native scene scaling is independent of
+the HUD's output size. Scene-to-HUD blits use the actual raster sizes, including
+fractional 1080p output within 2x backing storage. NVIDIA device extensions are
+requested when the device is created so Native sessions can enable DLSS later.
+The vblank worker observes refresh-rate changes without restarting. See
+[In-game graphics settings](graphics-menu.md) for validation and current limits.
+
+0076 lets passive ImGui dialogs opt out of continuous UI repaints. The performance
+overlay draws with game frames; interactive dialogs continue to request redraws
+for input and animations. This prevents the FPS display itself from driving the
+presenter at a higher rate than the game.
+
+0077 adds SMAA 1x to the FH1 scene/native-HUD bridge. It fetches pinned, hash-checked
+MIT sources and lookup tables from iryoku/smaa, packages the license, and compiles
+three Vulkan compute passes. SMAA bypasses NGX and temporal jitter/history. The
+live graphics transaction accepts the new scene mode and suppresses final-image
+FXAA while scene AA is active. Optional diagnostics log guest MSAA sample counts
+without changing the guest registers or render-target layout.
