@@ -5,20 +5,30 @@ from . import schema
 
 FILENAME = "graphics-settings.json"
 KEYS = {"output", "upscaler", "resolution_scale", "frame_rate", "vsync",
-        "anisotropic_override", "forza_hud_edges", "forza_performance_overlay"}
+        "anisotropic_override", "forza_hud_edges", "forza_performance_overlay", "anti_aliasing"}
 NVIDIA = {"quality", "balanced", "dlss", "dlaa"}
 FSR3 = {"fsr3_quality", "fsr3_balanced", "fsr3_performance", "fsr3_native"}
 
 
-def configure_runtime(cfg, env, args):
+def configure_runtime(cfg, env, args, write=True):
     """Keep native scene scale independent of the output/HUD, as the live menu does."""
-    from . import dlss, paths
-    if paths.IS_WINDOWS and dlss.ready(cfg):
+    from . import dlss, fsr3, paths
+    if write and paths.IS_WINDOWS and "FORZA_DLSS_RUNTIME" not in env and dlss.ready(cfg):
         env.setdefault("FORZA_DLSS_RUNTIME", str(dlss.runtime_dir(cfg)))
     values = cfg.settings
+    aa = values.get("forza_antialiasing", "game")
+    scaling = values.get("fh1_upscaler", "off") != "off" or values.get("present_effect") == "fsr3"
+    if scaling or aa != "game":
+        args.append("--swap_post_effect=none")
+    if scaling and aa != "game":
+        raise RuntimeError("Upscaling includes anti-aliasing. Turn it off before choosing a separate AA method.")
+    if aa != "game" and (values.get("gpu_backend", "vulkan") != "vulkan" or values.get("forza_ultrawide")):
+        raise RuntimeError("Separate scene anti-aliasing currently requires Vulkan and standard 16:9 output.")
+    if aa == "dlaa" and not dlss.enabled(cfg):
+        raise RuntimeError("DLAA requires an NVIDIA RTX GPU and its runtime.")
     if (values.get("gpu_backend", "vulkan") != "vulkan" or
             values.get("forza_ultrawide") or dlss.enabled(cfg) or
-            values.get("present_effect") == "fsr3"):
+            fsr3.enabled(cfg)):
         return
     sizes = {"1080p": (1920, 1080, 2), "1440p": (2560, 1440, 2), "4k": (3840, 2160, 3)}
     size = sizes.get(values.get("resolution"))
@@ -26,6 +36,9 @@ def configure_runtime(cfg, env, args):
     if size is None or scene_scale not in (1, 2, 3):
         return
     width, height, output_scale = size
+    if aa == "smaa":
+        args += ["--fh1_upscaler=smaa"]
+        scene_scale = output_scale
     args += ["--fh1_scene_720p_native_hud=true", f"--fh1_native_scene_scale={scene_scale}",
              f"--resolution_scale={output_scale}", f"--fh1_output_width={width}",
              f"--fh1_output_height={height}"]
@@ -60,6 +73,12 @@ def translate(document, current):
                 changes.update(present_effect="fsr3", fsr3_mode=value[5:])
             elif current.get("present_effect") == "fsr3":
                 changes["present_effect"] = "bilinear"
+        elif key == "anti_aliasing":
+            if value not in {"game", "integrated", "smaa", "dlaa", "fsr3_native"}:
+                raise ValueError("unsupported anti-aliasing")
+            if value == "dlaa" and "fh1_upscaler" not in schema.BY_KEY:
+                raise ValueError("NVIDIA anti-aliasing is unavailable on this platform")
+            changes["forza_antialiasing"] = "game" if value == "integrated" else value
         elif key == "forza_performance_overlay":
             if value not in {"off", "fps", "graph"}:
                 raise ValueError("unsupported performance overlay")
@@ -78,6 +97,22 @@ def translate(document, current):
             if not valid:
                 raise ValueError(f"unsupported {key}")
             changes[key] = number
+    if "anti_aliasing" in values:
+        mode = values.get("upscaler")
+        if mode is None:
+            mode = current.get("fh1_upscaler", "off")
+            if mode == "off" and current.get("present_effect") == "fsr3":
+                mode = "fsr3_" + current.get("fsr3_mode", "quality")
+        aa = values["anti_aliasing"]
+        if (mode != "off" and aa != "integrated") or (mode == "off" and aa == "integrated"):
+            raise ValueError("incompatible upscaling and anti-aliasing")
+    elif "upscaler" in values:
+        changes["forza_antialiasing"] = "game"
+    # Accept old version-1 requests from builds with the combined selector.
+    if "anti_aliasing" not in values and values.get("upscaler") == "dlaa":
+        changes.update(fh1_upscaler="off", forza_antialiasing="dlaa")
+    elif "anti_aliasing" not in values and values.get("upscaler") == "fsr3_native":
+        changes.update(present_effect="bilinear", forza_antialiasing="fsr3_native")
     return changes
 
 

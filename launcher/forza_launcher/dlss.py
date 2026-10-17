@@ -53,7 +53,8 @@ def runtime_dir(cfg) -> Path:
 
 def enabled(cfg) -> bool:
     return (cfg.gpu_vendor() == gpu.NVIDIA and
-            cfg.settings.get("fh1_upscaler", "off") != "off")
+            (cfg.settings.get("fh1_upscaler", "off") != "off" or
+             cfg.settings.get("forza_antialiasing") == "dlaa"))
 
 
 def menu_runtime_enabled(cfg) -> bool:
@@ -79,7 +80,9 @@ def check_renderer(folder):
 def configure(cfg, env, args, notes, write=True):
     if not enabled(cfg):
         return
-    mode = cfg.settings.get("fh1_upscaler")
+    mode = cfg.settings.get("fh1_upscaler", "off")
+    if mode == "off" and cfg.settings.get("forza_antialiasing") == "dlaa":
+        mode = "dlaa"
     if mode not in ("quality", "balanced", "dlss", "dlaa"):
         raise RuntimeError(f"Unknown NVIDIA reconstruction mode: {mode}")
     if not paths.IS_WINDOWS:
@@ -92,7 +95,7 @@ def configure(cfg, env, args, notes, write=True):
     if write:
         status.parent.mkdir(parents=True, exist_ok=True)
     env["FORZA_DLSS_STATUS_FILE"] = str(status)
-    args += ["--gpu_backend=vulkan", f"--resolution={resolution}", f"--resolution_scale={scale}",
+    args += [f"--fh1_upscaler={mode}", "--gpu_backend=vulkan", f"--resolution={resolution}", f"--resolution_scale={scale}",
              f"--fh1_output_width={width}", f"--fh1_output_height={height}"]
     label = {"quality": "DLSS Quality", "balanced": "DLSS Balanced", "dlss": "DLSS Performance",
              "dlaa": "DLAA"}[mode]

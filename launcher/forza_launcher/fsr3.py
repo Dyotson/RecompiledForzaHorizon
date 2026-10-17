@@ -14,14 +14,16 @@ SIZES = {"1080p": (1920, 1080, 2), "1440p": (2560, 1440, 2), "4k": (3840, 2160, 
 
 
 def enabled(cfg) -> bool:
-    return cfg.settings.get("present_effect") == "fsr3" and not dlss.enabled(cfg)
+    return (cfg.settings.get("present_effect") == "fsr3" or
+            cfg.settings.get("forza_antialiasing") == "fsr3_native") and not dlss.enabled(cfg)
 
 
 def configure(cfg, args, notes):
     if not enabled(cfg):
         return
-    mode = cfg.settings.get("fsr3_mode", "performance")
-    resolution = cfg.settings.get("fsr3_output_resolution", "1440p")
+    native_aa = cfg.settings.get("forza_antialiasing") == "fsr3_native" and cfg.settings.get("present_effect") != "fsr3"
+    mode = "native" if native_aa else cfg.settings.get("fsr3_mode", "performance")
+    resolution = cfg.settings.get("resolution", "1440p") if native_aa else cfg.settings.get("fsr3_output_resolution", "1440p")
     if mode not in MODES:
         raise RuntimeError(f"Unknown AMD FSR 3 mode: {mode}")
     if resolution not in SIZES:

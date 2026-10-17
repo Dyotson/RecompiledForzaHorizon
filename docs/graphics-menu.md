@@ -106,9 +106,66 @@ then Low / Medium / High and overlay FPS / graph / Off from the pause menu. Back
 restored the saved graph mode and filtering. Auto saved DLSS Quality at 1440p in
 the same process. The overlay read approximately 67-68 FPS in the garage exterior
 while the independent FPS log read 68.1; this is an observed test scene, not a
-benchmark of each preset. The native settings list displays all nine rows.
+benchmark of each preset. The monitoring/preset version displayed nine rows; the separate AA selector now makes ten.
 
 The standalone `forza-recomp/tests/graphics_monitor_test.cpp` exercises steady
 30/60 FPS, long hitches, stale samples, ring wraparound, and preset fallbacks.
-It builds without the SDK using a C++17 compiler. All 12 menu launcher tests pass;
-the full 183-test launcher suite retains the same 15 existing failures as #121.
+It builds without the SDK using a C++17 compiler. The monitoring/preset version
+passed its 12 menu launcher tests; the current AA extension is validated below.
+
+## Anti-aliasing and upscaling
+
+**Upscaling** selects Off, DLSS Quality/Balanced/Performance, or FSR 3
+Quality/Balanced/Performance. Reconstruction includes temporal anti-aliasing;
+the separate **Anti-aliasing** row then has one locked choice, Included
+(upscaler). With upscaling Off it offers:
+
+- **Game default (MSAA):** preserves the sample count requested by each guest
+  render pass. No sample-count register override is made.
+- **SMAA 1x:** the official high-preset spatial algorithm, running as three compute
+  passes (edge detection, blend weights, neighborhood blending) on scene color
+  before native HUD composition. It uses no history, jitter, or NVIDIA runtime.
+- **NVIDIA DLAA:** output-sized temporal reconstruction on RTX, using the existing
+  verified automatic runtime setup.
+- **FSR Native AA (TAA):** output-sized FidelityFX temporal AA using the existing
+  depth, motion-vector and jitter bridge. This is FSR's native AA implementation,
+  not a newly written generic TAA algorithm.
+
+These methods keep the game's own MSAA on intermediate targets. SMAA is an
+additional spatial pass, not a substitute for a guest multisample resolve.
+The launcher separates these choices too, migrates former DLAA / FSR Native
+selections, and disables incompatible combinations. Final-image FXAA is disabled
+when scene AA/reconstruction is active so it cannot filter the native HUD.
+`forza_antialiasing` is launcher configuration; launch arguments translate it to
+the renderer's existing scene-mode setting. The native menu saves the independent
+`anti_aliasing` field alongside `upscaler` in its version-1 request.
+
+### MSAA investigation
+
+With `FORZA_AA_DIAGNOSTICS=1`, the TU4 run observed guest-requested 4x targets at
+pitch 640, single-sample targets at pitch 1280, and 2x targets at pitch 1280.
+This is a mixed per-pass layout. A global 2x/4x override would also need to change
+EDRAM tile addressing, depth/color target layouts and guest resolves together.
+The existing `native_2x_msaa` flag chooses the implementation of a guest 2x target;
+it does not enable 2x AA globally. Its launcher label now states that distinction.
+Forced MSAA counts remain unimplemented rather than offering unsafe overrides.
+
+### Validation of the AA extension
+
+The Windows public SDK and TU4 host built successfully, and all 66 SDK patches
+apply. The separate DLAA launcher setting prepared its pinned runtime and reached
+free roam with output-sized 2560x1440 input; DLAA -> SMAA then applied live.
+A separate SMAA launch had no NVIDIA runtime folder, no `FORZA_DLSS_RUNTIME`,
+and no loaded NGX modules. It reached free roam at 2560x1440,
+and passed a short driving check. The same process switched SMAA -> FSR Native AA
+-> FSR Quality -> SMAA without restart. Missing-runtime DLSS selection restored
+the preceding FSR Native AA configuration and left the saved request unchanged.
+The native AA row locked while upscaling was enabled and unlocked when disabled.
+Captures show native HUD/menu text and no rainbow car in these tested scenes;
+this is not a claim of complete temporal-artifact coverage.
+
+The focused launcher/AA/vendor tests passed (47). The full root launcher suite
+ran 187 tests with the same 15 existing baseline failures tracked by #121.
+SMAA shader and lookup-table sources are pinned and SHA-256 checked against
+[the official SMAA project](https://github.com/iryoku/smaa/tree/71c806a838bdd7d517df19192a20f0c61b3ca29d);
+its MIT license is packaged with the SDK.

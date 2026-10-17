@@ -63,6 +63,63 @@ class InGameGraphicsTests(unittest.TestCase):
             self.assertFalse(ingame.import_pending(self.cfg, lambda _: None))
             self.assertEqual(self.cfg.settings, previous)
 
+    def test_separate_aa_round_trip_and_exclusive_upscaling(self):
+        for aa in ("game", "smaa", "fsr3_native"):
+            self.request(upscaler="off", anti_aliasing=aa)
+            self.assertTrue(ingame.import_pending(self.cfg, lambda _: None))
+            self.assertEqual(Config(self.cfg.path).settings["forza_antialiasing"], aa)
+        for mode, aa in (("quality", "smaa"), ("fsr3_quality", "fsr3_native"),
+                         ("off", "integrated"), ("off", "msaa8x")):
+            previous = dict(self.cfg.settings)
+            self.request(upscaler=mode, anti_aliasing=aa)
+            self.assertFalse(ingame.import_pending(self.cfg, lambda _: None))
+            self.assertEqual(self.cfg.settings, previous)
+        self.cfg.settings.update(present_effect="fsr3", fsr3_mode="quality", fh1_upscaler="off")
+        self.request(anti_aliasing="smaa")
+        self.assertFalse(ingame.import_pending(self.cfg, lambda _: None))
+        self.request(upscaler="fsr3_quality", anti_aliasing="integrated")
+        self.assertTrue(ingame.import_pending(self.cfg, lambda _: None))
+        self.assertEqual(self.cfg.settings["forza_antialiasing"], "game")
+
+    def test_smaa_runtime_is_native_and_never_prepares_nvidia(self):
+        self.cfg.settings.update(gpu_backend="vulkan", resolution="1440p",
+                                 resolution_scale=1, present_effect="bilinear",
+                                 forza_antialiasing="smaa", fh1_upscaler="off")
+        args, env = [], {}
+        with patch.object(dlss, "ready", return_value=False), patch.object(dlss, "prepare") as prepare:
+            ingame.configure_runtime(self.cfg, env, args)
+        prepare.assert_not_called()
+        self.assertNotIn("FORZA_DLSS_RUNTIME", env)
+        self.assertIn("--fh1_upscaler=smaa", args)
+        self.assertIn("--fh1_output_width=2560", args)
+        self.assertIn("--fh1_native_scene_scale=2", args)
+        self.cfg.settings.update(present_effect="fsr3", fsr3_mode="quality")
+        with self.assertRaisesRegex(RuntimeError, "includes anti-aliasing"):
+            ingame.configure_runtime(self.cfg, {}, [])
+
+    def test_native_fsr_aa_uses_output_sized_input_without_nvidia(self):
+        from forza_launcher import fsr3
+        self.cfg.settings.update(forza_antialiasing="fsr3_native", present_effect="bilinear",
+                                 resolution="1440p", fh1_upscaler="off")
+        args = []
+        fsr3.configure(self.cfg, args, [])
+        self.assertIn("--fh1_upscaler=fsr3_native", args)
+        self.assertFalse(dlss.enabled(self.cfg))
+
+    @unittest.skipUnless("fh1_upscaler" in schema.BY_KEY, "Windows NVIDIA setting")
+    def test_legacy_dlaa_migrates_to_separate_aa_selector(self):
+        self.cfg.settings.update(fh1_upscaler="dlaa")
+        self.cfg.save()
+        cfg = Config(self.cfg.path)
+        self.assertEqual(cfg.settings["fh1_upscaler"], "off")
+        self.assertEqual(cfg.settings["forza_antialiasing"], "dlaa")
+        cfg.gpu_vendor = lambda: gpu.NVIDIA
+        with patch.object(dlss, "prepare") as prepare:
+            args = []
+            dlss.configure(cfg, {}, args, [], write=False)
+        prepare.assert_not_called()
+        self.assertIn("--fh1_upscaler=dlaa", args)
+
     def test_invalid_request_does_not_partially_apply(self):
         previous = dict(self.cfg.settings)
         for values in [{"frame_rate": "120", "output": "12k"},

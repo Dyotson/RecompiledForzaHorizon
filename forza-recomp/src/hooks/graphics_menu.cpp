@@ -7,6 +7,7 @@
 #include "../platform/guest_addr.h"
 #include "../platform/guest_memory.h"
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <fstream>
 #include <rex/cvar.h>
@@ -233,6 +234,29 @@ bool ApplyPreview() {
   return success;
 }
 
+constexpr size_t kAntiAliasing = 9;
+constexpr std::array<size_t, 10> kDisplayOrder{0, 1, kAntiAliasing, 2, 3, 4, 5, 6, 7, 8};
+void AntiAliasingChoices() {
+  auto &aa = settings[kAntiAliasing];
+  if (settings[1].value != "off") {
+    aa.choices = {{"integrated", "Included (upscaler)"}};
+    aa.value = "integrated";
+    return;
+  }
+  if (aa.value == "integrated") aa.value = "game";
+  aa.choices = {{"game", "Game default (MSAA)"}};
+  if (rex::cvar::GetFlagByName("gpu_backend") == "vulkan") {
+    aa.choices.push_back({"smaa", "SMAA 1x"});
+#ifdef _WIN32
+    if (std::getenv("FORZA_DLSS_RUNTIME")) aa.choices.push_back({"dlaa", "NVIDIA DLAA"});
+#endif
+    aa.choices.push_back({"fsr3_native", "FSR Native AA (TAA)"});
+  }
+}
+std::string BackendMode() {
+  return settings[1].value != "off" ? settings[1].value :
+      settings[kAntiAliasing].value == "game" ? "off" : settings[kAntiAliasing].value;
+}
 void Snapshot() {
   settings = {
       {"output",
@@ -242,7 +266,7 @@ void Snapshot() {
        {{"1080p", "1920 x 1080"},
         {"1440p", "2560 x 1440"},
         {"4k", "3840 x 2160"}}},
-      {"upscaler", "fh1_upscaler", "Anti-aliasing", "", {{"off", "Native"}}},
+      {"upscaler", "fh1_upscaler", "Upscaling", "", {{"off", "Off"}}},
       {"resolution_scale",
        "resolution_scale",
        "Native render scale",
@@ -288,6 +312,7 @@ void Snapshot() {
       {"preset", "", "Quality preset", "custom",
        {{"custom", "Custom"}, {"auto", "Auto (recommended)"}, {"low", "Low"},
         {"medium", "Medium"}, {"high", "High"}}},
+      {"anti_aliasing", "", "Anti-aliasing", "game", {}},
   };
   auto &modes = settings[1].choices;
 #ifdef _WIN32
@@ -296,18 +321,16 @@ void Snapshot() {
        std::getenv("FORZA_DLSS_RUNTIME"))) {
     modes.insert(modes.end(), {{"quality", "DLSS Quality"},
                                {"balanced", "DLSS Balanced"},
-                               {"dlss", "DLSS Performance"},
-                               {"dlaa", "DLAA"}});
+                               {"dlss", "DLSS Performance"}});
   }
 #endif
   if (rex::cvar::GetFlagByName("gpu_backend") == "vulkan") {
     modes.insert(modes.end(), {{"fsr3_quality", "FSR 3 Quality"},
                                {"fsr3_balanced", "FSR 3 Balanced"},
-                               {"fsr3_performance", "FSR 3 Performance"},
-                               {"fsr3_native", "FSR 3 Native AA"}});
+                               {"fsr3_performance", "FSR 3 Performance"}});
   }
   for (auto &setting : settings) {
-    if (setting.key == "preset") continue;
+    if (setting.key == "preset" || setting.key == "anti_aliasing") continue;
     setting.value = rex::cvar::GetFlagByName(setting.cvar);
     if (setting.value.empty())
       setting.value = setting.choices.front().value;
@@ -316,11 +339,17 @@ void Snapshot() {
     settings[2].value = rex::cvar::GetFlagByName("fh1_native_scene_scale");
   if (rex::cvar::GetFlagByName("present_effect") == "fsr3")
     settings[1].value = "fsr3_" + rex::cvar::GetFlagByName("fsr3_mode");
+  const auto combined_mode = settings[1].value;
+  if (combined_mode == "smaa" || combined_mode == "dlaa" || combined_mode == "fsr3_native") {
+    settings[1].value = "off";
+    settings[kAntiAliasing].value = combined_mode;
+  }
   if (!saved_settings.empty()) {
     for (size_t i = 0; i < settings.size(); ++i)
       if (!IsLive(settings[i]) && settings[i].key != "preset")
         settings[i].value = saved_settings[i].value;
   }
+  AntiAliasingChoices();
   RememberPreview();
 }
 
@@ -388,6 +417,7 @@ namespace {
 bool opening_graphics = false;
 uint32_t graphics_screen = 0;
 std::vector<uint32_t> native_rows;
+std::vector<uint32_t> retired_choices;
 uint32_t empty_pause_source = 0;
 void PauseRows(Native &ui, uint8_t *base, bool show) {
   auto component = Read(base, active_menu + 0x170);
@@ -411,15 +441,29 @@ void PauseRows(Native &ui, uint8_t *base, bool show) {
 const char *Help(size_t i) {
   constexpr const char *help[] = {
       "Output resolution. The HUD stays native. Save applies the change in this session.",
-      "DLSS increases performance; DLAA uses native input. Save applies the change in this session.",
-      "Scene resolution with Native selected. Reconstruction chooses its own input size. Save applies the change.",
+      "Reconstruct a lower-resolution scene with DLSS or FSR. Anti-aliasing is integrated while upscaling is on.",
+      "Scene resolution with Game default selected. Reconstruction chooses its own input size. Save applies the change.",
       "Maximum frame rate. Save applies the limit without restarting.",
       "Synchronize presentation with the display. Previews immediately. Back undoes unsaved edits.",
       "Improve texture detail on roads and distant surfaces. Previews immediately. Back undoes unsaved edits.",
       "Move ultrawide HUD anchors to the center or edges. Previews immediately when HUD layout is enabled.",
       "Show measured game FPS, optionally with recent frame times in milliseconds. Previews immediately.",
-      "Adjust reconstruction and filtering together. Auto uses available features and output size, not a benchmark. HUD and FPS limit stay unchanged."};
+      "Adjust reconstruction and filtering together. Auto uses available features and output size, not a benchmark. HUD and FPS limit stay unchanged.",
+      "Game default preserves guest MSAA. SMAA is spatial. DLAA and FSR Native AA are temporal at output resolution. Turn off upscaling to select a separate AA method."};
   return i < std::size(help) ? help[i] : "Save applies graphics changes without restarting.";
+}
+uint32_t MakeChoices(Native &ui, uint8_t *base, size_t i) {
+  auto &setting = settings[i];
+  const auto choices = ui.Call(0x824265C8, {0x28});
+  if (!choices) return 0;
+  ui.Call(0x828DD2A8, {choices, uint32_t(setting.choices.size())});
+  for (size_t j = 0; j < setting.choices.size(); ++j) {
+    const auto text = ui.Text(setting.choices[j].label);
+    ui.context().f1.f64 = 0;
+    ui.Call(0x828DDCA8, {choices, uint32_t(j), text, 0, 0, 0, 1});
+    ui.Call(0x824CEAB0, {text});
+  }
+  return choices;
 }
 void SyncSettings(Native &ui, uint8_t *base) {
   const auto previous_output = settings[0].value;
@@ -427,11 +471,13 @@ void SyncSettings(Native &ui, uint8_t *base) {
   const auto previous_scale = settings[2].value;
   const auto previous_filtering = settings[5].value;
   const auto previous_preset = settings[8].value;
+  const auto previous_aa = settings[kAntiAliasing].value;
   for (size_t i = 0; i < native_rows.size(); ++i) {
     const auto choice = Read(base, native_rows[i] + 8);
     if (choice < settings[i].choices.size())
       settings[i].value = settings[i].choices[choice].value;
   }
+  const auto old_aa_choices = settings[kAntiAliasing].choices;
   bool refresh = false;
   if (settings[8].value != previous_preset && settings[8].value != "custom") {
     const auto &modes = settings[1].choices;
@@ -443,16 +489,27 @@ void SyncSettings(Native &ui, uint8_t *base) {
     const auto preset = ChoosePreset(settings[8].value, settings[0].value,
                                      available("quality"), available("fsr3_quality"));
     settings[1].value = preset.mode;
+    settings[kAntiAliasing].value = "game";
     settings[2].value = std::to_string(preset.scene_scale);
     settings[5].value = std::to_string(preset.filtering);
     refresh = true;
   } else if (settings[0].value != previous_output || settings[1].value != previous_mode || settings[2].value != previous_scale ||
-             settings[5].value != previous_filtering) {
+             settings[5].value != previous_filtering || settings[kAntiAliasing].value != previous_aa) {
     settings[8].value = "custom";
     refresh = true;
   }
+  AntiAliasingChoices();
+  const bool aa_changed = old_aa_choices.size() != settings[kAntiAliasing].choices.size() ||
+      old_aa_choices.front().value != settings[kAntiAliasing].choices.front().value;
+  if (aa_changed) {
+    if (const auto choices = MakeChoices(ui, base, kAntiAliasing)) {
+      retired_choices.push_back(Read(base, native_rows[kAntiAliasing] + 4));
+      Write(base, native_rows[kAntiAliasing] + 4, choices);
+      refresh = true;
+    }
+  }
   if (refresh) {
-    for (size_t i : {size_t(1), size_t(2), size_t(5), size_t(8)}) {
+    for (size_t i : {size_t(1), size_t(2), size_t(5), size_t(8), kAntiAliasing}) {
       for (size_t j = 0; j < settings[i].choices.size(); ++j)
         if (settings[i].choices[j].value == settings[i].value)
           Write(base, native_rows[i] + 8, uint32_t(j));
@@ -495,8 +552,8 @@ extern "C" REX_FUNC(sub_827303E8) {
   ui.Call(0x8267A4B0, {source});
   Write(base, graphics_screen + 0x1A0, source);
   Write(base, Read(base, graphics_screen + 0xA4) + 0x1C, source);
-  native_rows.clear();
-  for (size_t i = 0; i < settings.size(); ++i) {
+  native_rows.assign(settings.size(), 0);
+  for (size_t i : kDisplayOrder) {
     auto &setting = settings[i];
     uint32_t row = ui.Call(0x824265C8, {0x1C});
     for (unsigned offset = 0; offset < 0x1C; offset += 4)
@@ -506,20 +563,13 @@ extern "C" REX_FUNC(sub_827303E8) {
     ui.Call(0x82471820, {row + 0x10, label});
     ui.Call(0x824CEAB0, {label});
     Write(base, row + 0xC, uint32_t(i));
-    uint32_t choices = ui.Call(0x824265C8, {0x28});
-    ui.Call(0x828DD2A8, {choices, uint32_t(setting.choices.size())});
+    const uint32_t choices = MakeChoices(ui, base, i);
     Write(base, row + 4, choices);
-    for (size_t j = 0; j < setting.choices.size(); ++j) {
-      auto text = ui.Text(setting.choices[j].label);
-      ui.context().f1.f64 = 0;
-      ui.Call(0x828DDCA8, {choices, uint32_t(j), text, 0, 0, 0, 1});
-      ui.Call(0x824CEAB0, {text});
-      if (setting.choices[j].value == setting.value)
-        Write(base, row + 8, uint32_t(j));
-    }
+    for (size_t j = 0; j < setting.choices.size(); ++j)
+      if (setting.choices[j].value == setting.value) Write(base, row + 8, uint32_t(j));
     Write(base, ui.scratch(), row);
     ui.Call(0x826D9C80, {source + 0x18, ui.scratch()});
-    native_rows.push_back(row);
+    native_rows[i] = row;
   }
   ui.Call(0x827FBDD0, {graphics_screen});
   ui.Call(0x82F1EC20, {graphics_screen, ui.Hash("DIFFICULTY")});
@@ -552,7 +602,7 @@ extern "C" REX_FUNC(sub_82739190) {
     return;
   uint32_t component = Read(base, graphics_screen + 0x16C);
   if (ctx.r5.u32 == component + 8) {
-    ui.Binding(graphics_screen + 0x17C, Help(ctx.r6.u32));
+    ui.Binding(graphics_screen + 0x17C, Help(ctx.r6.u32 < kDisplayOrder.size() ? kDisplayOrder[ctx.r6.u32] : 0));
   } else {
     SyncSettings(ui, base);
     ApplyPreview();
@@ -575,6 +625,9 @@ extern "C" REX_FUNC(sub_827142C0) {
     ui.Call(Read(base, Read(base, choices)), {choices, 1});
     ui.Call(Read(base, Read(base, row)), {row, 1});
   }
+  for (const auto choices : retired_choices)
+    ui.Call(Read(base, Read(base, choices)), {choices, 1});
+  retired_choices.clear();
   auto source = Read(base, graphics_screen + 0x1A0);
   ui.Call(Read(base, Read(base, source)), {source, 1});
   Write(base, graphics_screen + 0x1A0, 0);
@@ -605,7 +658,7 @@ extern "C" REX_FUNC(sub_82736B08) {
     const auto height = output == "4k" ? "2160" : output == "1080p" ? "1080" : "1440";
     applying_settings = settings;
     applying_request = std::to_string(++request_id) + " " + width + " " + height +
-        " " + settings[2].value + " " + settings[1].value;
+        " " + settings[2].value + " " + BackendMode();
     if (!rex::cvar::SetFlagByName("fh1_graphics_request", applying_request)) {
       applying_request.clear();
       ui.Binding(graphics_screen + 0x17C, "Could not apply graphics settings.");

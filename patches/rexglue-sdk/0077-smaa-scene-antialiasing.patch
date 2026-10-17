@@ -1,0 +1,475 @@
+diff --git a/cmake/ForzaSmaa.cmake b/cmake/ForzaSmaa.cmake
+new file mode 100644
+--- /dev/null
++++ b/cmake/ForzaSmaa.cmake
+@@ -0,0 +1,50 @@
++# SMAA 1x, official MIT sources and lookup tables. No NVIDIA runtime required.
++set(_smaa_revision "71c806a838bdd7d517df19192a20f0c61b3ca29d")
++set(_smaa_root "${CMAKE_BINARY_DIR}/_deps/smaa-${_smaa_revision}")
++set(_smaa_files
++  SMAA.hlsl 4db53d92ef0b45661f8450303589ffabce93c352cae4282a6f32dd2b80efbeb9
++  Textures/AreaTex.h 1933bf43ce86ba71f7ed5f0fa94b148610c634dc3395b9bc67a817d51ee73af2
++  Textures/SearchTex.h 1fac315ab5f87b60083c9b8387af17f056204d3d1bf21500f2acc5b3e8c1a37a
++  LICENSE.txt 2b848b67ba50ac40b53e11cf1ccdaee2a190ca83b4652cba695a5f1ce81f52ae)
++list(LENGTH _smaa_files _smaa_count)
++set(_smaa_index 0)
++while(_smaa_index LESS _smaa_count)
++  list(GET _smaa_files ${_smaa_index} relative)
++  math(EXPR _smaa_index "${_smaa_index}+1")
++  list(GET _smaa_files ${_smaa_index} expected)
++  math(EXPR _smaa_index "${_smaa_index}+1")
++  set(path "${_smaa_root}/${relative}")
++  set(actual "")
++  if(EXISTS "${path}")
++    file(SHA256 "${path}" actual)
++  endif()
++  if(NOT actual STREQUAL expected)
++    get_filename_component(parent "${path}" DIRECTORY)
++    file(MAKE_DIRECTORY "${parent}")
++    file(DOWNLOAD "https://raw.githubusercontent.com/iryoku/smaa/${_smaa_revision}/${relative}"
++      "${path}.download" EXPECTED_HASH "SHA256=${expected}" TLS_VERIFY ON TIMEOUT 180 STATUS status)
++    list(GET status 0 code)
++    if(NOT code EQUAL 0)
++      message(FATAL_ERROR "Pinned SMAA source download failed: ${status}")
++    endif()
++    file(RENAME "${path}.download" "${path}")
++  endif()
++endwhile()
++set(FH1_SMAA_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/fh1-smaa")
++file(MAKE_DIRECTORY "${FH1_SMAA_GENERATED}")
++set(_smaa_old "")
++if(EXISTS "${FH1_SMAA_GENERATED}/source.stamp")
++  file(READ "${FH1_SMAA_GENERATED}/source.stamp" _smaa_old)
++endif()
++if(NOT EXISTS "${FH1_SMAA_GENERATED}/fh1_smaa_source.inc" OR NOT _smaa_old STREQUAL _smaa_revision)
++  file(READ "${_smaa_root}/SMAA.hlsl" hex HEX)
++  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," hex "${hex}")
++  file(WRITE "${FH1_SMAA_GENERATED}/fh1_smaa_source.inc"
++    "// Generated from official SMAA ${_smaa_revision} (MIT).\nstatic const unsigned char kSmaaSource[] = {${hex}};\n")
++  file(WRITE "${FH1_SMAA_GENERATED}/source.stamp" "${_smaa_revision}")
++endif()
++target_include_directories(rexgpu-xenos PRIVATE "${FH1_SMAA_GENERATED}" "${_smaa_root}/Textures")
++add_custom_command(TARGET rexgpu-xenos POST_BUILD
++  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_smaa_root}/LICENSE.txt"
++    "$<TARGET_FILE_DIR:rexgpu-xenos>/SMAA-LICENSE.txt")
++install(FILES "${_smaa_root}/LICENSE.txt" DESTINATION share/licenses/smaa)
+diff --git a/include/rex/graphics/vulkan/fh1_smaa.h b/include/rex/graphics/vulkan/fh1_smaa.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/graphics/vulkan/fh1_smaa.h
+@@ -0,0 +1,18 @@
++#pragma once
++#include <memory>
++#include <rex/ui/vulkan/api.h>
++namespace rex::ui::vulkan { class VulkanDevice; }
++namespace rex::graphics::vulkan {
++// SMAA 1x: edge detection -> blend weights -> neighborhood blending.
++// Invoked on the scene before the game draws native-resolution HUD elements.
++class Fh1Smaa {
++ public:
++  explicit Fh1Smaa(const ui::vulkan::VulkanDevice* device);
++  ~Fh1Smaa();
++  bool Initialize(uint32_t width, uint32_t height, VkImageView color, VkImageView output);
++  void Execute(VkCommandBuffer command);
++ private:
++  struct State;
++  std::unique_ptr<State> state_;
++};
++}
+diff --git a/src/graphics/vulkan/fh1_smaa.cpp b/src/graphics/vulkan/fh1_smaa.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/graphics/vulkan/fh1_smaa.cpp
+@@ -0,0 +1,218 @@
++// Host integration of the official MIT SMAA 1x algorithm by Jorge Jimenez et al.
++// Shader and lookup tables are pinned/hash checked by cmake/ForzaSmaa.cmake.
++#include <rex/graphics/vulkan/fh1_smaa.h>
++#include <rex/graphics/vulkan/fh1_dlss.h>
++#include <rex/ui/vulkan/device.h>
++#include <rex/ui/vulkan/instance.h>
++#include <rex/ui/vulkan/util.h>
++#include <rex/logging.h>
++#include <array>
++#include <algorithm>
++#include <cstring>
++#include <string>
++#include <vector>
++#include "AreaTex.h"
++#include "SearchTex.h"
++
++namespace rex::graphics::vulkan {
++namespace {
++#include "fh1_smaa_source.inc"
++constexpr VkImageSubresourceRange kColorRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++}
++struct Fh1Smaa::State {
++  const ui::vulkan::VulkanDevice* device;
++  uint32_t width{}, height{};
++  struct Image { VkImage image{}; VkDeviceMemory memory{}; VkImageView view{}; };
++  std::array<Image, 4> images; // edges, weights, area lookup, search lookup
++  VkBuffer upload{};
++  VkDeviceMemory upload_memory{};
++  VkSampler sampler{};
++  VkDescriptorSetLayout set_layout{};
++  VkPipelineLayout layout{};
++  VkDescriptorPool pool{};
++  std::array<VkDescriptorSet, 3> sets{};
++  std::array<VkPipeline, 3> pipelines{};
++  bool first = true;
++
++  void Barrier(VkCommandBuffer command, VkImage image, VkImageLayout old_layout,
++               VkImageLayout new_layout, VkAccessFlags src, VkAccessFlags dst) {
++    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++    barrier.srcAccessMask = src; barrier.dstAccessMask = dst;
++    barrier.oldLayout = old_layout; barrier.newLayout = new_layout;
++    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    barrier.image = image; barrier.subresourceRange = kColorRange;
++    device->functions().vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
++  }
++  bool Create(Image& image, uint32_t w, uint32_t h, VkFormat format, bool storage) {
++    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++    info.imageType = VK_IMAGE_TYPE_2D; info.format = format; info.extent = {w,h,1};
++    info.mipLevels = info.arrayLayers = 1; info.samples = VK_SAMPLE_COUNT_1_BIT;
++    info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                 (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0);
++    if (!ui::vulkan::util::CreateDedicatedAllocationImage(device, info,
++        ui::vulkan::util::MemoryPurpose::kDeviceLocal, image.image, image.memory)) return false;
++    VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
++    view.image = image.image; view.viewType = VK_IMAGE_VIEW_TYPE_2D; view.format = format;
++    view.subresourceRange = kColorRange;
++    return device->functions().vkCreateImageView(device->device(), &view, nullptr, &image.view) == VK_SUCCESS;
++  }
++  bool Pipeline(unsigned pass) {
++    std::string source = R"glsl(#version 450
++layout(local_size_x=8, local_size_y=8) in;
++layout(push_constant) uniform Constants { vec4 metrics; } pc;
++#define SMAA_GLSL_3 1
++#define SMAA_PRESET_HIGH 1
++#define SMAA_RT_METRICS pc.metrics
++// Pixel-shader discard means a zero edge in a compute pass. Every pixel is
++// written, so an edge from the preceding frame can never remain in the buffer.
++#define discard return vec2(0.0)
++)glsl";
++    source.append(reinterpret_cast<const char*>(kSmaaSource), sizeof(kSmaaSource));
++    source += R"glsl(
++layout(binding=0) uniform sampler2D colorTex;
++layout(binding=1) uniform sampler2D edgesTex;
++layout(binding=2) uniform sampler2D blendTex;
++layout(binding=3) uniform sampler2D areaTex;
++layout(binding=4) uniform sampler2D searchTex;
++)glsl";
++    source += pass == 2 ? "layout(binding=5,rgba16f) writeonly uniform image2D resultImage;\n" :
++                          "layout(binding=5,rgba8) writeonly uniform image2D resultImage;\n";
++    source += R"glsl(void main() {
++  ivec2 p = ivec2(gl_GlobalInvocationID.xy);
++  if (any(greaterThanEqual(p, imageSize(resultImage)))) return;
++  vec2 uv = (vec2(p)+0.5)*pc.metrics.xy;
++)glsl";
++    if (pass == 0) source += R"glsl(
++  vec4 offsets[3]; SMAAEdgeDetectionVS(uv,offsets);
++  imageStore(resultImage,p,vec4(SMAALumaEdgeDetectionPS(uv,offsets,colorTex),0,0));
++)glsl";
++    else if (pass == 1) source += R"glsl(
++  vec2 pixel; vec4 offsets[3]; SMAABlendingWeightCalculationVS(uv,pixel,offsets);
++  imageStore(resultImage,p,SMAABlendingWeightCalculationPS(uv,pixel,offsets,edgesTex,areaTex,searchTex,vec4(0)));
++)glsl";
++    else source += R"glsl(
++  vec4 offset; SMAANeighborhoodBlendingVS(uv,offset);
++  imageStore(resultImage,p,SMAANeighborhoodBlendingPS(uv,offset,colorTex,blendTex));
++)glsl";
++    source += "}\n";
++    std::vector<uint32_t> spirv; std::string error;
++    if (!CompileFh1Compute(source,spirv,error)) {
++      REXGPU_ERROR("SMAA pass {}: {}",pass,error); return false;
++    }
++    pipelines[pass] = ui::vulkan::util::CreateComputePipeline(device,layout,
++        spirv.data(),spirv.size()*sizeof(uint32_t));
++    return pipelines[pass] != VK_NULL_HANDLE;
++  }
++};
++Fh1Smaa::Fh1Smaa(const ui::vulkan::VulkanDevice* device) : state_(std::make_unique<State>()) {
++  state_->device = device;
++}
++Fh1Smaa::~Fh1Smaa() {
++  auto& s=*state_; const auto& f=s.device->functions(); const auto d=s.device->device();
++  for (auto pipeline:s.pipelines) if (pipeline) f.vkDestroyPipeline(d,pipeline,nullptr);
++  if (s.pool) f.vkDestroyDescriptorPool(d,s.pool,nullptr);
++  if (s.layout) f.vkDestroyPipelineLayout(d,s.layout,nullptr);
++  if (s.set_layout) f.vkDestroyDescriptorSetLayout(d,s.set_layout,nullptr);
++  if (s.sampler) f.vkDestroySampler(d,s.sampler,nullptr);
++  if (s.upload) f.vkDestroyBuffer(d,s.upload,nullptr);
++  if (s.upload_memory) f.vkFreeMemory(d,s.upload_memory,nullptr);
++  for (auto& image:s.images) {
++    if (image.view) f.vkDestroyImageView(d,image.view,nullptr);
++    if (image.image) f.vkDestroyImage(d,image.image,nullptr);
++    if (image.memory) f.vkFreeMemory(d,image.memory,nullptr);
++  }
++}
++bool Fh1Smaa::Initialize(uint32_t width,uint32_t height,VkImageView color,VkImageView output) {
++  auto& s=*state_; s.width=width;s.height=height;
++  const auto& f=s.device->functions(); const auto d=s.device->device();
++  if (!s.Create(s.images[0],width,height,VK_FORMAT_R8G8B8A8_UNORM,true) ||
++      !s.Create(s.images[1],width,height,VK_FORMAT_R8G8B8A8_UNORM,true) ||
++      !s.Create(s.images[2],AREATEX_WIDTH,AREATEX_HEIGHT,VK_FORMAT_R8G8_UNORM,false) ||
++      !s.Create(s.images[3],SEARCHTEX_WIDTH,SEARCHTEX_HEIGHT,VK_FORMAT_R8_UNORM,false)) return false;
++  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(s.device,AREATEX_SIZE+SEARCHTEX_SIZE,
++      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,ui::vulkan::util::MemoryPurpose::kUpload,
++      s.upload,s.upload_memory)) return false;
++  void* mapped=nullptr;
++  if (f.vkMapMemory(d,s.upload_memory,0,VK_WHOLE_SIZE,0,&mapped)!=VK_SUCCESS) return false;
++  std::memcpy(mapped,areaTexBytes,AREATEX_SIZE);
++  std::memcpy(static_cast<unsigned char*>(mapped)+AREATEX_SIZE,searchTexBytes,SEARCHTEX_SIZE);
++  // Upload memory may be non-coherent on a discrete GPU.
++  VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
++  range.memory=s.upload_memory;range.size=VK_WHOLE_SIZE;
++  const auto flushed=f.vkFlushMappedMemoryRanges(d,1,&range);
++  f.vkUnmapMemory(d,s.upload_memory);
++  if (flushed!=VK_SUCCESS) return false;
++  VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
++  sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
++  sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++  if (f.vkCreateSampler(d,&sampler,nullptr,&s.sampler)!=VK_SUCCESS) return false;
++  std::array<VkDescriptorSetLayoutBinding,6> bindings{};
++  for (unsigned i=0;i<6;++i) bindings[i]={i,i==5?VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
++      VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr};
++  VkDescriptorSetLayoutCreateInfo set{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
++  set.bindingCount=uint32_t(bindings.size());set.pBindings=bindings.data();
++  if (f.vkCreateDescriptorSetLayout(d,&set,nullptr,&s.set_layout)!=VK_SUCCESS) return false;
++  VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,16};
++  VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
++  layout.setLayoutCount=1;layout.pSetLayouts=&s.set_layout;
++  layout.pushConstantRangeCount=1;layout.pPushConstantRanges=&push;
++  if (f.vkCreatePipelineLayout(d,&layout,nullptr,&s.layout)!=VK_SUCCESS) return false;
++  const VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,15},
++                                     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,3}};
++  VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
++  pool.maxSets=3;pool.poolSizeCount=2;pool.pPoolSizes=sizes;
++  if (f.vkCreateDescriptorPool(d,&pool,nullptr,&s.pool)!=VK_SUCCESS) return false;
++  const VkDescriptorSetLayout layouts[]={s.set_layout,s.set_layout,s.set_layout};
++  VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
++  alloc.descriptorPool=s.pool;alloc.descriptorSetCount=3;alloc.pSetLayouts=layouts;
++  if (f.vkAllocateDescriptorSets(d,&alloc,s.sets.data())!=VK_SUCCESS) return false;
++  // Sets are immutable after initialization. Concurrent frames don't update
++  // descriptors that may still be referenced by an earlier submission.
++  for (unsigned pass=0;pass<3;++pass) {
++    const VkImageView views[]={color,s.images[0].view,s.images[1].view,
++                              s.images[2].view,s.images[3].view,
++                              pass==0?s.images[0].view:pass==1?s.images[1].view:output};
++    std::array<VkDescriptorImageInfo,6> info{};
++    std::array<VkWriteDescriptorSet,6> writes{};
++    for (unsigned i=0;i<6;++i) {
++      info[i]={i==5?VK_NULL_HANDLE:s.sampler,views[i],VK_IMAGE_LAYOUT_GENERAL};
++      writes[i]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
++      writes[i].dstSet=s.sets[pass];writes[i].dstBinding=i;writes[i].descriptorCount=1;
++      writes[i].descriptorType=bindings[i].descriptorType;writes[i].pImageInfo=&info[i];
++    }
++    f.vkUpdateDescriptorSets(d,uint32_t(writes.size()),writes.data(),0,nullptr);
++    if (!s.Pipeline(pass)) return false;
++  }
++  return true;
++}
++void Fh1Smaa::Execute(VkCommandBuffer command) {
++  auto& s=*state_;const auto& f=s.device->functions();
++  if (s.first) {
++    for (auto& image:s.images) s.Barrier(command,image.image,VK_IMAGE_LAYOUT_UNDEFINED,
++        VK_IMAGE_LAYOUT_GENERAL,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT);
++    for (unsigned i=2;i<4;++i) {
++      VkBufferImageCopy copy{};copy.bufferOffset=i==2?0:AREATEX_SIZE;
++      copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
++      copy.imageExtent=i==2?VkExtent3D{AREATEX_WIDTH,AREATEX_HEIGHT,1}:VkExtent3D{SEARCHTEX_WIDTH,SEARCHTEX_HEIGHT,1};
++      f.vkCmdCopyBufferToImage(command,s.upload,s.images[i].image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
++      s.Barrier(command,s.images[i].image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_GENERAL,
++                VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT);
++    }
++    s.first=false;
++  } else {
++    for (unsigned i=0;i<2;++i) s.Barrier(command,s.images[i].image,VK_IMAGE_LAYOUT_GENERAL,
++        VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_SHADER_WRITE_BIT);
++  }
++  const float metrics[]={1.0f/s.width,1.0f/s.height,float(s.width),float(s.height)};
++  for (unsigned pass=0;pass<3;++pass) {
++    f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,s.pipelines[pass]);
++    f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,s.layout,0,1,&s.sets[pass],0,nullptr);
++    f.vkCmdPushConstants(command,s.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(metrics),metrics);
++    f.vkCmdDispatch(command,(s.width+7)/8,(s.height+7)/8,1);
++    if (pass<2) s.Barrier(command,s.images[pass].image,VK_IMAGE_LAYOUT_GENERAL,
++        VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT);
++  }
++}
++}
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -47,6 +47,7 @@
+     vulkan/deferred_command_buffer.cpp
+     vulkan/fh1_dlss.cpp
+     vulkan/fh1_fsr3.cpp
++    vulkan/fh1_smaa.cpp
+     vulkan/command_processor.cpp
+     vulkan/pipeline_cache.cpp
+     vulkan/primitive_processor.cpp
+@@ -100,6 +101,10 @@
+ 
+ add_library(rexgpu-xenos SHARED ${REXGPU_XENOS_SOURCES})
+ add_library(rex::gpu-xenos ALIAS rexgpu-xenos)
++
++if(REXGLUE_USE_VULKAN)
++    include(${REXGLUE_ROOT}/cmake/ForzaSmaa.cmake)
++endif()
+ 
+ option(REXGLUE_USE_FSR3 "Build the FH1 AMD FidelityFX FSR 3 upscaler (fetches pinned MIT sources)" ON)
+ set(REXGLUE_FSR3_SDK "" CACHE PATH "Optional local FidelityFX SDK v1.1.4; otherwise fetch the pinned FSR 3 sources")
+diff --git a/src/graphics/vulkan/fh1_dlss.cpp b/src/graphics/vulkan/fh1_dlss.cpp
+--- a/src/graphics/vulkan/fh1_dlss.cpp
++++ b/src/graphics/vulkan/fh1_dlss.cpp
+@@ -10,6 +10,7 @@
+ #include <chrono>
+ #include <cmath>
+ #include <rex/graphics/vulkan/fh1_fsr3.h>
++#include <rex/graphics/vulkan/fh1_smaa.h>
+ #if defined(REX_FH1_NGX)
+ #include <nvsdk_ngx_helpers_vk.h>
+ #include <nvsdk_ngx_helpers.h>
+@@ -46,6 +47,10 @@
+   NVSDK_NGX_Handle* feature = nullptr;
+ #endif
+   // AMD FidelityFX FSR 3 backend: the same inputs, a different reconstruction.
++  bool smaa_mode = false;
++  std::unique_ptr<Fh1Smaa> smaa;
++  bool InitializeSmaa();
++  void EvaluateSmaa(VkCommandBuffer command, VkImage scene, VkImage destination);
+   bool fsr_mode = false;
+   std::unique_ptr<Fh1Fsr3> fsr;
+   std::chrono::steady_clock::time_point last_frame{};
+@@ -211,6 +216,7 @@
+   state_->device = device;
+   state_->mode = mode;
+   state_->dlaa = mode == "dlaa";
++  state_->smaa_mode = mode == "smaa";
+   state_->fsr_mode = mode.rfind("fsr3_", 0) == 0;
+   state_->output_width = output_width;
+   state_->output_height = output_height;
+@@ -222,6 +228,7 @@
+ void Fh1Dlss::SetSceneBacking(uint32_t scale) { state_->backing_scale = scale; }
+ Fh1Dlss::~Fh1Dlss() {
+   auto& s = *state_;
++  s.smaa.reset();
+   s.fsr.reset();
+ #if defined(REX_FH1_NGX)
+   if (s.feature) NVSDK_NGX_VULKAN_ReleaseFeature(s.feature);
+@@ -276,6 +283,7 @@
+ 
+ bool Fh1Dlss::Initialize() {
+   auto& s = *state_;
++  if (s.smaa_mode) return s.InitializeSmaa();
+   if (s.fsr_mode) return s.InitializeFsr3();
+ #if defined(REX_FH1_NGX)
+ #if defined(_WIN32)
+@@ -342,6 +350,10 @@
+ }
+ void Fh1Dlss::Execute(VkCommandBuffer command, VkImage scene, VkImage destination, const FrameInput& frame_input) {
+   auto& s = *state_;
++  if (s.smaa_mode) {
++    s.EvaluateSmaa(command, scene, destination);
++    return; // Spatial SMAA must never enable viewport jitter or temporal history.
++  }
+   if (s.fsr_mode) {
+     ++s.submissions;
+     if (s.failed) {
+@@ -445,6 +457,40 @@
+       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1280 * s.backing_scale, 720 * s.backing_scale, s.output_width, s.output_height);
+ #endif
+ }
++bool Fh1Dlss::State::InitializeSmaa() {
++  width = output_width; height = output_height;
++  blit = reinterpret_cast<PFN_vkCmdBlitImage>(device->vulkan_instance()->functions().vkGetDeviceProcAddr(
++      device->device(), "vkCmdBlitImage"));
++  if (!blit || !Create(images[0], width, height, VK_FORMAT_R16G16B16A16_SFLOAT) ||
++      !Create(images[1], width, height, VK_FORMAT_R16G16B16A16_SFLOAT)) return false;
++  smaa = std::make_unique<Fh1Smaa>(device);
++  if (!smaa->Initialize(width, height, images[0].view, images[1].view)) return false;
++  REXGPU_INFO("SMAA 1x initialized: {}x{}, before native HUD, jitter off", width, height);
++  return true;
++}
++void Fh1Dlss::State::EvaluateSmaa(VkCommandBuffer command, VkImage scene, VkImage destination) {
++  if (!images_ready) {
++    for (unsigned i = 0; i < 2; ++i)
++      Barrier(command, images[i].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
++          0, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT);
++    images_ready = true;
++  }
++  Barrier(command, images[0].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
++      VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
++  Blit(command, scene, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[0].image,
++      VK_IMAGE_LAYOUT_GENERAL, 1280 * backing_scale, 720 * backing_scale, width, height);
++  Barrier(command, images[0].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
++      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
++  Barrier(command, images[1].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
++      VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT);
++  smaa->Execute(command);
++  Barrier(command, images[1].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
++      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
++  Blit(command, images[1].image, VK_IMAGE_LAYOUT_GENERAL, destination,
++      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, width, height, width, height);
++  if (++frames == 1) ReportStatus("ready: SMAA 1x at " + std::to_string(width) + "x" +
++      std::to_string(height) + ", native UI, no temporal jitter.");
++}
+ bool Fh1Dlss::State::InitializeFsr3() {
+   const float ratio = Fh1Fsr3::Ratio(mode);
+   if (ratio <= 0.0f) { REXGPU_ERROR("FSR 3: unknown mode {}", mode); return false; }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -78,7 +78,7 @@
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_STRING(fh1_graphics_result, "", "GPU/Vulkan", "FH1 live graphics result")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+-REXCVAR_DEFINE_STRING(fh1_upscaler, "off", "GPU/Vulkan", "FH1 scene reconstruction: off; NVIDIA DLSS quality, balanced, performance (dlss), dlaa; AMD FSR 3 fsr3_quality, fsr3_balanced, fsr3_performance, fsr3_native").lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_STRING(fh1_upscaler, "off", "GPU/Vulkan", "FH1 scene reconstruction: off, smaa; NVIDIA DLSS quality, balanced, performance (dlss), dlaa; AMD FSR 3 fsr3_quality, fsr3_balanced, fsr3_performance, fsr3_native").lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_UINT32(fh1_output_width, 2560, "GPU/Vulkan", "FH1 reconstruction output width").lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ REXCVAR_DEFINE_UINT32(fh1_output_height, 1440, "GPU/Vulkan", "FH1 reconstruction output height")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -4230,7 +4230,7 @@
+       !((width == 1920 && height == 1080) || (width == 2560 && height == 1440) ||
+         (width == 3840 && height == 2160)) || scene_scale < 1 || scene_scale > 3 ||
+       !(mode == "off" || mode == "quality" || mode == "balanced" || mode == "dlss" ||
+-        mode == "dlaa" || mode == "fsr3_quality" || mode == "fsr3_balanced" ||
++        mode == "smaa" || mode == "dlaa" || mode == "fsr3_quality" || mode == "fsr3_balanced" ||
+         mode == "fsr3_performance" || mode == "fsr3_native")) {
+     result("error: unsupported graphics settings");
+     return;
+@@ -4265,7 +4265,7 @@
+       std::max((fh1_dlss_->width() + 1279) / 1280, (fh1_dlss_->height() + 719) / 720) : 1;
+   const char* names[] = {"fh1_upscaler", "fh1_output_width", "fh1_output_height",
+       "fh1_scene_720p_native_hud", "fh1_native_scene_scale", "resolution_scale",
+-      "draw_resolution_scale_x", "draw_resolution_scale_y"};
++      "draw_resolution_scale_x", "draw_resolution_scale_y", "swap_post_effect"};
+   std::vector<std::string> previous;
+   for (auto name : names) previous.push_back(rex::cvar::GetFlagByName(name));
+   // NGX initialization/shutdown is per device. Release the old feature before
+@@ -4274,6 +4274,7 @@
+   fh1_split_enabled_ = false;
+   const uint32_t output_scale = (height + 719) / 720;
+   rex::cvar::SetFlagByName("fh1_upscaler", mode);
++  if (mode != "off") rex::cvar::SetFlagByName("swap_post_effect", "none");
+   rex::cvar::SetFlagByName("fh1_output_width", std::to_string(width));
+   rex::cvar::SetFlagByName("fh1_output_height", std::to_string(height));
+   rex::cvar::SetFlagByName("fh1_scene_720p_native_hud", "true");
+@@ -4480,6 +4481,15 @@
+     if (fh1_other_render_targets_ && is_rasterization_done && pixel_shader) {
+       const auto color = regs.Get<reg::RB_COLOR_INFO>();
+       const auto surface = regs.Get<reg::RB_SURFACE_INFO>();
++      if (std::getenv("FORZA_AA_DIAGNOSTICS")) {
++        static uint32_t seen = 0;
++        const auto samples = uint32_t(surface.msaa_samples);
++        if (samples < 3 && !(seen & (1u << samples))) {
++          seen |= 1u << samples;
++          REXGPU_INFO("FH1 AA: guest requests {}x MSAA, pitch={}, color format={}",
++              1u << samples, surface.surface_pitch, uint32_t(color.color_format));
++        }
++      }
+       // The same packed formats also occur in small intermediate targets in
+       // the title sequence. Only the full front buffer marks the scene/UI split.
+       const bool front_buffer = surface.surface_pitch == 1280 &&

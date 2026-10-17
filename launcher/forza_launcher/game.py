@@ -447,7 +447,7 @@ def build_plan(cfg: Config, game: GameInstall, write=True, refresh_xenia=False, 
     dlss.configure(cfg, env, args, notes, write)
     dlss_status_file = Path(env["FORZA_DLSS_STATUS_FILE"]) if "FORZA_DLSS_STATUS_FILE" in env else None
     fsr3.configure(cfg, args, notes)
-    ingame.configure_runtime(cfg, env, args)
+    ingame.configure_runtime(cfg, env, args, write=write)
 
     extra = split_args(cfg.advanced.get("extra_args", ""))
     vendor_arg = gpu_vendor_arg(cfg, extra)

@@ -143,3 +143,10 @@ The vblank worker observes refresh-rate changes without restarting. See
 overlay draws with game frames; interactive dialogs continue to request redraws
 for input and animations. This prevents the FPS display itself from driving the
 presenter at a higher rate than the game.
+
+0077 adds SMAA 1x to the FH1 scene/native-HUD bridge. It fetches pinned, hash-checked
+MIT sources and lookup tables from iryoku/smaa, packages the license, and compiles
+three Vulkan compute passes. SMAA bypasses NGX and temporal jitter/history. The
+live graphics transaction accepts the new scene mode and suppresses final-image
+FXAA while scene AA is active. Optional diagnostics log guest MSAA sample counts
+without changing the guest registers or render-target layout.
