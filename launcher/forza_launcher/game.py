@@ -363,6 +363,9 @@ def gpu_vendor_arg(cfg: Config, extra_args=()) -> str:
 
 
 def build_plan(cfg: Config, game: GameInstall, write=True, refresh_xenia=False, log=print) -> LaunchPlan:
+    from . import ingame
+    if write:
+        ingame.import_pending(cfg, log)
     home = cfg.data_home()
     data = cfg.game_files()
     toml_path = game.dir / "forza.toml"
@@ -371,6 +374,7 @@ def build_plan(cfg: Config, game: GameInstall, write=True, refresh_xenia=False, 
     args = [f"--game_data_root={data}"]
     notes = []
     env, unset = {}, []
+    env["FORZA_GRAPHICS_SETTINGS"] = str(home / ingame.FILENAME)
 
     # The profile: your own, or a copy of your Xenia Canary save (play.sh --xenia).
     log_file = home / "forza.log"

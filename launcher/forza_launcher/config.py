@@ -80,6 +80,8 @@ class Config:
         online = self.d["online"]
         if online.get("mode") == "custom" and online.get("custom_server", "").strip() in OLD_PUBLIC_SERVERS:
             online["mode"], online["custom_server"] = "public", ""
+        from . import ingame
+        ingame.import_pending(self)
 
     def save(self):
         _atomic_write(self.path, json.dumps(self.d, indent=2) + "\n")

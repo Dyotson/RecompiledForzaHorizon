@@ -119,6 +119,7 @@ set(FORZA_SOURCES
     src/hooks/crowd_anim.cpp
     src/hooks/ultrawide_projection.cpp
     src/hooks/frame_time.cpp
+    src/hooks/graphics_menu.cpp
     src/hooks/gpu_wait.cpp
     src/hooks/physics_loader_check.cpp
     src/hooks/resource_data_release.cpp

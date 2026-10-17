@@ -8,6 +8,7 @@
 #include "kernel/live.h"
 #include "platform/achievement_toast.h"
 #include "platform/hud_overlay.h"
+#include "platform/graphics_menu.h"
 #include "platform/vulkan_hooks.h"
 #include "platform/ultrawide.h"
 #include <rex/ui/window.h>
@@ -115,6 +116,7 @@ class ForzaApp : public rex::ReXApp {
   // raw Cache0/Cache1 partitions with a null device), so cache:\ fails with "device
   // not found". Mount a host folder there as Xenia does with mount_cache.
   void OnPreLaunchModule() override {
+    forza::graphics_menu::Initialize(user_data_root());
     if (window()) forza::ultrawide::Initialize(window()->GetActualPhysicalWidth(),
         window()->GetActualPhysicalHeight(),
         [this, last = std::array<double, 6>{-1,-1,-1,-1,-1,-1}]
