@@ -183,6 +183,44 @@ struct Setting {
 uint32_t active_menu = 0;
 std::vector<Setting> settings;
 std::vector<Setting> saved_settings;
+std::vector<std::pair<std::string, std::string>> preview_baseline;
+
+bool IsLive(const Setting &setting) {
+  return setting.key == "vsync" || setting.key == "anisotropic_override" ||
+         setting.key == "forza_hud_edges";
+}
+
+void RememberPreview() {
+  preview_baseline.clear();
+  for (const auto &setting : settings)
+    if (IsLive(setting))
+      preview_baseline.emplace_back(setting.cvar,
+                                    rex::cvar::GetFlagByName(setting.cvar));
+}
+
+void RestorePreview() {
+  for (const auto &[name, value] : preview_baseline) {
+    if (rex::cvar::GetFlagByName(name) == value)
+      continue;
+    if (rex::cvar::SetFlagByName(name, value))
+      REXLOG_INFO("Graphics menu: reverted live {}={}", name, value);
+  }
+  preview_baseline.clear();
+}
+
+bool ApplyPreview() {
+  bool success = true;
+  for (const auto &setting : settings) {
+    if (!IsLive(setting) ||
+        rex::cvar::GetFlagByName(setting.cvar) == setting.value)
+      continue;
+    const bool applied = rex::cvar::SetFlagByName(setting.cvar, setting.value);
+    REXLOG_INFO("Graphics menu: live {}={} applied={}", setting.cvar,
+                setting.value, applied);
+    success &= applied;
+  }
+  return success;
+}
 
 void Snapshot() {
   settings = {
@@ -259,8 +297,12 @@ void Snapshot() {
   }
   if (rex::cvar::GetFlagByName("present_effect") == "fsr3")
     settings[1].value = "fsr3_" + rex::cvar::GetFlagByName("fsr3_mode");
-  if (!saved_settings.empty())
-    settings = saved_settings;
+  if (!saved_settings.empty()) {
+    for (size_t i = 0; i < settings.size(); ++i)
+      if (!IsLive(settings[i]))
+        settings[i].value = saved_settings[i].value;
+  }
+  RememberPreview();
 }
 
 bool Save() {
@@ -335,13 +377,15 @@ const char *Help(size_t i) {
       "DLSS increases performance; DLAA uses native input for anti-aliasing. "
       "Changes apply next launch.",
       "Scene resolution without reconstruction. DLSS and FSR choose their own "
-      "input resolution.",
+      "input resolution. Changes apply next launch.",
       "Maximum frame rate. Changes apply next launch.",
-      "Synchronize presentation with the display. Changes apply next launch.",
-      "Improve texture detail on roads and distant surfaces. Changes apply "
-      "next launch.",
-      "Position the HUD inside a centered area or at the screen edges. Changes "
-      "apply next launch."};
+      "Synchronize presentation with the display. Applies immediately. Save "
+      "keeps the change; Back undoes unsaved edits.",
+      "Improve texture detail on roads and distant surfaces. Applies "
+      "immediately. Save keeps the change; Back undoes unsaved edits.",
+      "Position the ultrawide HUD at the center or screen edges. Applies "
+      "immediately during gameplay when HUD layout is enabled. Back undoes "
+      "unsaved edits."};
   return i < std::size(help) ? help[i] : "Changes apply next launch.";
 }
 void Footer(Native &ui, uint8_t *base) {
@@ -385,7 +429,7 @@ extern "C" REX_FUNC(sub_827303E8) {
     for (unsigned offset = 0; offset < 0x1C; offset += 4)
       Write(base, row + offset, 0);
     Write(base, row, 0x82049434);
-    auto label = ui.Text(setting.label);
+    auto label = ui.Text(setting.label + (IsLive(setting) ? "" : " *"));
     ui.Call(0x82471820, {row + 0x10, label});
     ui.Call(0x824CEAB0, {label});
     Write(base, row + 0xC, uint32_t(i));
@@ -409,14 +453,14 @@ extern "C" REX_FUNC(sub_827303E8) {
   ui.Field(graphics_screen, "TEXT_SCREEN_NAME", graphics_screen + 0x1F4,
            "GRAPHICS SETTINGS");
   ui.Field(graphics_screen, "TEXT_EARNINGS", graphics_screen + 0x1E8,
-           "NEXT LAUNCH");
+           "* RESTART REQUIRED");
   ui.Field(graphics_screen, "TEXT_TITLE", graphics_screen + 0x170,
            "GRAPHICS SETTINGS");
   ui.Field(graphics_screen, "TEXT_DESCRIPTION", graphics_screen + 0x17C,
            Help(0));
   ui.PathText(graphics_screen,
               "parent.Layer.Group_BLADE.Group_EARNINGS.Text_EARNINGS_LABEL",
-              graphics_screen + 0x1DC, "CHANGES APPLY");
+              graphics_screen + 0x1DC, "LIVE PREVIEW");
   PauseRows(ui, base, false);
   Footer(ui, base);
   REXLOG_INFO("Graphics menu: native fixed settings page built ({} rows)",
@@ -442,6 +486,7 @@ extern "C" REX_FUNC(sub_82739190) {
       if (choice < settings[i].choices.size())
         settings[i].value = settings[i].choices[choice].value;
     }
+    ApplyPreview();
   }
 }
 extern "C" REX_FUNC(sub_827142C0) {
@@ -455,6 +500,7 @@ extern "C" REX_FUNC(sub_827142C0) {
     return;
   if (empty_pause_source)
     PauseRows(ui, base, true);
+  RestorePreview();
   for (uint32_t row : native_rows) {
     auto choices = Read(base, row + 4);
     ui.Call(Read(base, Read(base, choices)), {choices, 1});
@@ -483,19 +529,32 @@ extern "C" REX_FUNC(sub_82736B08) {
         settings[i].value = settings[i].choices[choice].value;
     }
     bool saved = Save();
-    if (saved)
+    if (saved) {
       saved_settings = settings;
+      RememberPreview();
+    }
     ui.Binding(graphics_screen + 0x17C,
-               saved
-                   ? "Saved. Restart from the launcher to apply these settings."
-                   : "Could not save settings. Please try again.");
+               saved ? "Saved. Live changes are kept. Starred settings apply "
+                       "next launch."
+                     : "Could not save settings. Please try again.");
     REXLOG_INFO("Graphics menu: save {}", saved ? "complete" : "failed");
   } else if (event == 0x60) {
+    RestorePreview();
     PauseRows(ui, base, true);
     ui.Call(0x827F20F0, {graphics_screen});
   } else {
     auto component = Read(base, graphics_screen + 0x16C);
     ui.Call(Read(base, Read(base, component) + 0x34), {component, ctx.r4.u32});
+    // Read the spinner's final model after its callback dispatch has completed.
+    for (size_t i = 0; i < native_rows.size(); ++i) {
+      auto choice = Read(base, native_rows[i] + 8);
+      if (choice < settings[i].choices.size())
+        settings[i].value = settings[i].choices[choice].value;
+    }
+    if (!ApplyPreview())
+      ui.Binding(graphics_screen + 0x17C,
+                 "Could not apply this live change. Back restores the previous "
+                 "settings.");
   }
 }
 extern "C" REX_FUNC(MenuSelect) {
