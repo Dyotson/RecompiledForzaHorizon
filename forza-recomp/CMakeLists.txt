@@ -117,6 +117,7 @@ set(FORZA_SOURCES
     src/debug/frame_dump.cpp
     src/hooks/compressed_stream_stall.cpp
     src/hooks/crowd_anim.cpp
+    src/hooks/garage_camera.cpp
     src/hooks/ultrawide_projection.cpp
     src/hooks/frame_time.cpp
     src/hooks/graphics_menu.cpp

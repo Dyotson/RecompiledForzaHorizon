@@ -8,11 +8,12 @@
 
 #define sub_823E22C8 sub_82412260
 #define __imp__sub_823E22C8 __imp__sub_82412260
-
 #define sub_823ED888 sub_8241D948  // check
 #define __imp__sub_823ED888 __imp__sub_8241D948
 #define sub_823FD208 sub_8242D1A0
 #define __imp__sub_823FD208 __imp__sub_8242D1A0
+#define sub_8246EBB8 sub_8249E390
+#define __imp__sub_8246EBB8 __imp__sub_8249E390
 #define sub_8247C168 sub_824AB6C8
 #define __imp__sub_8247C168 __imp__sub_824AB6C8
 #define sub_8247C678 sub_824ABBD8
@@ -41,6 +42,12 @@
 #define __imp__sub_825ADB30 __imp__sub_82633570
 #define sub_825F5AA8 sub_82699E48
 #define __imp__sub_825F5AA8 __imp__sub_82699E48
+#define sub_82647B78 sub_826EFFC8
+#define __imp__sub_82647B78 __imp__sub_826EFFC8
+#define sub_82862170 sub_829128B8
+#define __imp__sub_82862170 __imp__sub_829128B8
+#define sub_82862CD0 sub_82913530
+#define __imp__sub_82862CD0 __imp__sub_82913530
 #define sub_82865340 sub_82915B58
 #define __imp__sub_82865340 __imp__sub_82915B58
 #define sub_828653D8 sub_82915BE0
@@ -117,11 +124,12 @@
 namespace forza {
 constexpr uint32_t Tu4Address(uint32_t a) {
   switch (a) {
-    case 0x829A48F4: return 0x82A58E34;
-    case 0x8263AE18: return 0x826E30A8;
     case 0x823EDB08: return 0x8241DBC8;  // code  // check
     case 0x82624B04: return 0x826CC2B4;  // code  // check
     case 0x82633824: return 0x826DBBFC;  // code
+    case 0x8263AE18: return 0x826E30A8;  // code
+    case 0x826499D4: return 0x826F2974;  // code
+    case 0x82653588: return 0x826FD0D8;  // code
     case 0x826E5354: return 0x827938AC;  // code
     case 0x8270101C: return 0x827B1FDC;  // code  // check
     case 0x828196F4: return 0x828C0CD4;  // code
@@ -133,6 +141,7 @@ constexpr uint32_t Tu4Address(uint32_t a) {
     case 0x82875A10: return 0x82926BB8;  // code
     case 0x8288DCD8: return 0x8293EEB0;  // code
     case 0x82893B20: return 0x82944EF8;  // code
+    case 0x829A48F4: return 0x82A58E34;  // code
     case 0x832DF00C: return 0x833CAACC;  // data
     case 0x832DF024: return 0x833CAAE4;  // data
     case 0x832E29A0: return 0x833D02E0;  // data

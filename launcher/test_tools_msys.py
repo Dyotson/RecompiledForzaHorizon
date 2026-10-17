@@ -91,5 +91,39 @@ class MsysSkipped(unittest.TestCase):
             sys.platform = orig
 
 
+
+class NinjaVersion(unittest.TestCase):
+    """#123: a ninja older than 1.10 (some Visual Studio bundles) is not used."""
+
+    def pick(self, sys_ver, vs_ver):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        def version_of(cmd, rx):
+            exe = cmd[0]
+            if "vsninja" in exe:
+                return vs_ver
+            if "sysninja" in exe:
+                return sys_ver
+            return None
+        def find(name, notes, version_probe=None):
+            return "/x/sysninja" if name == "ninja" and sys_ver else None
+        with unittest.mock.patch.object(be, "find_tool", side_effect=find), \
+                unittest.mock.patch.object(be, "_version_of", side_effect=version_of), \
+                unittest.mock.patch.object(be, "vs_bundled_tool", side_effect=lambda n: "/vs/vsninja" if n == "ninja" else None):
+            return be._detect_tools(Path(tmp.name))
+
+    def test_old_vs_ninja_is_skipped(self):
+        t = self.pick(None, (1, 8))
+        self.assertEqual(t.ninja, "")
+        self.assertTrue(any(m.startswith("ninja") for m in t.missing))
+
+    def test_new_vs_ninja_is_used(self):
+        t = self.pick(None, (1, 12))
+        self.assertEqual(t.ninja, "/vs/vsninja")
+
+    def test_old_system_ninja_is_skipped(self):
+        t = self.pick((1, 9), None)
+        self.assertNotEqual(t.ninja, "/x/sysninja")
+
 if __name__ == "__main__":
     unittest.main()

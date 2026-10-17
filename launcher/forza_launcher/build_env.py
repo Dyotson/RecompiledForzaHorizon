@@ -348,18 +348,21 @@ def _detect_tools(root: Path, prefer_downloaded=False) -> Tools:
     else:
         t.missing.append(f"cmake-{p}")
     # ninja
+    # ninja 1.10+ (#123): older ones (e.g. some Visual Studio bundles) fail with "multiple outputs
+    # aren't (yet?) supported by depslog" on the generated build.ninja.
     sys_ninja = None if prefer_downloaded else find_tool("ninja", t.notes, version_probe=_probe_text)
-    if sys_ninja:
+    nv = _version_of([sys_ninja, "--version"], r"(\d+\.\d+)") if sys_ninja else None
+    if sys_ninja and nv and nv >= (1, 10):
         t.ninja = sys_ninja
-        t.source["ninja"] = "system"
+        t.source["ninja"] = f"system (ninja {nv[0]}.{nv[1]})"
     elif dp["ninja"].is_file():
         t.ninja = str(dp["ninja"])
         t.path_dirs.append(str(dp["ninja"].parent))
         t.source["ninja"] = f"downloaded (ninja {pins.NINJA_VERSION})"
-    elif vs_ninja := vs_bundled_tool("ninja"):
+    elif (vs_ninja := vs_bundled_tool("ninja")) and (vn := _version_of([vs_ninja, "--version"], r"(\d+\.\d+)")) and vn >= (1, 10):
         t.ninja = vs_ninja
         t.path_dirs.append(str(Path(vs_ninja).parent))
-        t.source["ninja"] = "Visual Studio's"
+        t.source["ninja"] = f"Visual Studio's (ninja {vn[0]}.{vn[1]})"
     else:
         t.missing.append(f"ninja-{p}")
     # the C++ standard library headers (Linux): only the system can supply them

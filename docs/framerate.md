@@ -315,6 +315,35 @@ Left (not changed here):
   presentation mode ..." and the game's "present mode" line). Not measured on hardware yet: this
   RADV does not offer it (plain FIFO as before); an AMD Windows player is asked to test.
 
+## Garage and showroom camera timing (2026-10-17)
+
+The frontend has two frame-based camera paths independent of the race-intro
+timing below. `CUI4AnimatedCamera` passes a fixed 1/30 s (1/60 with its developer
+option) to `CTSCCamera` or `CCamAnimPlayer` on each update. The automatic orbit
+in `CUI4CarTargetCamera` adds 0.1 degree each update. Both speed up as the UI
+frame rate increases.
+
+`hooks/garage_camera.cpp` replaces only the animated camera caller's fixed step
+with elapsed time and the orbit increment with 3 degrees per elapsed second.
+Other callers retain their original dt, and manual rotation and camera
+transitions retain their existing paths. Per-camera animation timestamps avoid
+counting time spent dormant; returning after a gap above 250 ms starts with one
+original step rather than skipping ahead through the shot.
+
+A copied, progressed save was used in Dak's Garage / Custom Upgrade on Windows
+TU4 at native 2560x1440 with the 120 FPS limit. The original camera clock advanced
+8.0000004 seconds in 2.0030654 real seconds (3.994x). The corrected clock advanced
+1.9998623 seconds in 2.0016332 real seconds (0.999x). The fixed 1/30 input and
+the elapsed-time input were also observed at the guest update hooks. These are
+camera-clock measurements, not estimates from the selected FPS cap.
+
+`FORZA_GARAGE_CAMERA=game` retains the original timing for comparison;
+`FORZA_GARAGE_CAMERA_TRACE=1` logs the caller, camera and dt every 300 updates.
+The standalone `tests/garage_camera_math_test.cpp` checks ten-second orbit
+distances at 30/60/120/144/240 FPS, delayed frames, wrapping, zero and invalid dt.
+The Windows TU4 build passes. Disc addresses are mapped; the disc build has not
+been run locally.
+
 ## Fixed: race-start animations looked too fast (#7, 2026-10-12, fixed 2026-10-14)
 
 Report: in every race start the crowd, the intro shots, the camera sweep over the grid and
