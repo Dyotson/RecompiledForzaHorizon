@@ -51,6 +51,18 @@ class InGameGraphicsTests(unittest.TestCase):
         if "fh1_upscaler" in schema.BY_KEY:
             self.assertEqual(self.cfg.settings["fh1_upscaler"], "off")
 
+    def test_performance_overlay_round_trips_each_mode(self):
+        for mode in ("off", "fps", "graph"):
+            with self.subTest(mode=mode):
+                self.request(forza_performance_overlay=mode)
+                self.assertTrue(ingame.import_pending(self.cfg, lambda _: None))
+                self.assertEqual(Config(self.cfg.path).settings["forza_performance_overlay"], mode)
+        previous = dict(self.cfg.settings)
+        for bad in ("on", "GPU", "Graph", True):
+            self.request(forza_performance_overlay=bad)
+            self.assertFalse(ingame.import_pending(self.cfg, lambda _: None))
+            self.assertEqual(self.cfg.settings, previous)
+
     def test_invalid_request_does_not_partially_apply(self):
         previous = dict(self.cfg.settings)
         for values in [{"frame_rate": "120", "output": "12k"},

@@ -5,7 +5,7 @@ from . import schema
 
 FILENAME = "graphics-settings.json"
 KEYS = {"output", "upscaler", "resolution_scale", "frame_rate", "vsync",
-        "anisotropic_override", "forza_hud_edges"}
+        "anisotropic_override", "forza_hud_edges", "forza_performance_overlay"}
 NVIDIA = {"quality", "balanced", "dlss", "dlaa"}
 FSR3 = {"fsr3_quality", "fsr3_balanced", "fsr3_performance", "fsr3_native"}
 
@@ -60,6 +60,10 @@ def translate(document, current):
                 changes.update(present_effect="fsr3", fsr3_mode=value[5:])
             elif current.get("present_effect") == "fsr3":
                 changes["present_effect"] = "bilinear"
+        elif key == "forza_performance_overlay":
+            if value not in {"off", "fps", "graph"}:
+                raise ValueError("unsupported performance overlay")
+            changes[key] = value
         elif key in {"vsync", "forza_hud_edges"}:
             if value not in ("true", "false"):
                 raise ValueError(f"invalid {key}")

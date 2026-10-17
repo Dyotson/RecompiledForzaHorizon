@@ -1,6 +1,7 @@
 // forza - frame-time statistics; see frame_stats.h and docs/perf.md.
 
 #include "frame_stats.h"
+#include "../platform/hud_overlay.h"
 
 #include "../hooks/frame_time.h"
 
@@ -202,6 +203,7 @@ Stream& Present() {
 bool Enabled() { return GetConfig().enabled; }
 
 void OnGuestFrame() {
+  PerformanceOverlayFrame();
   if (!Enabled()) return;
   const Clock::time_point now = Clock::now();
   Guest().OnFrame(now);

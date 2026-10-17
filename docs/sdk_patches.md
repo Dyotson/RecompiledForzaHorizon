@@ -138,3 +138,8 @@ fractional 1080p output within 2x backing storage. NVIDIA device extensions are
 requested when the device is created so Native sessions can enable DLSS later.
 The vblank worker observes refresh-rate changes without restarting. See
 [In-game graphics settings](graphics-menu.md) for validation and current limits.
+
+0076 lets passive ImGui dialogs opt out of continuous UI repaints. The performance
+overlay draws with game frames; interactive dialogs continue to request redraws
+for input and animations. This prevents the FPS display itself from driving the
+presenter at a higher rate than the game.

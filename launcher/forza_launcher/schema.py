@@ -49,6 +49,9 @@ def add(*a, **k):
 add("frame_rate", "Frame rate", "Display", "fps", 30,
     "30 is the console's rate; 60 to 240 (60, 120, 144, ...) run the game faster. Physics and "
     "race timing keep their speed (docs/framerate.md).", "Frame rate")
+add("forza_performance_overlay", "Performance overlay", "Display", "choice", "off",
+    "Measured game FPS, optionally with a frame-time graph. Does not count UI redraws.",
+    "Frame rate", choices=[("off", "Off"), ("fps", "FPS"), ("graph", "FPS + frame-time graph")])
 add("vsync", "Vertical sync", "Display", "bool", True,
     "Wait for the display's refresh. Turn off only for testing.", "Frame rate")
 add("video_mode_refresh_rate", "Guest refresh rate (Hz)", "Display", "float", 0.0,

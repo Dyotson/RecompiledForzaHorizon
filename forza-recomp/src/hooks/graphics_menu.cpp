@@ -2,6 +2,8 @@
 // tu_address_map: TU4 addresses
 // The scene/model layouts below are validated for Title Update 4 only.
 #include "../platform/graphics_menu.h"
+#include "../platform/hud_overlay.h"
+#include "../platform/graphics_presets.h"
 #include "../platform/guest_addr.h"
 #include "../platform/guest_memory.h"
 #include <algorithm>
@@ -122,9 +124,12 @@ public:
     Call(0x82555B90, {scratch_, object});
     return scratch_;
   }
-  void Add(uint32_t menu, uint32_t id, const std::string &label) {
+  void AddSource(uint32_t source, uint32_t id, const std::string &label) {
     if (uint32_t text = Text(label))
-      Call(0x828F5818, {menu + 0x174, text, id, 1, 0});
+      Call(0x828F5818, {source, text, id, 1, 0});
+  }
+  void Add(uint32_t menu, uint32_t id, const std::string &label) {
+    AddSource(menu + 0x174, id, label);
   }
   uint32_t scratch() const { return scratch_; }
   uint32_t Hash(const std::string &value) {
@@ -182,6 +187,8 @@ struct Setting {
   std::vector<Choice> choices;
 };
 uint32_t active_menu = 0;
+uint32_t main_menu = 0;
+bool from_main_menu = false;
 std::vector<Setting> settings;
 std::vector<Setting> saved_settings;
 std::vector<Setting> applying_settings;
@@ -191,7 +198,7 @@ std::vector<std::pair<std::string, std::string>> preview_baseline;
 
 bool IsLive(const Setting &setting) {
   return setting.key == "vsync" || setting.key == "anisotropic_override" ||
-         setting.key == "forza_hud_edges";
+         setting.key == "forza_hud_edges" || setting.key == "forza_performance_overlay";
 }
 
 void RememberPreview() {
@@ -276,6 +283,11 @@ void Snapshot() {
        "Ultrawide HUD",
        "",
        {{"false", "Centered"}, {"true", "Screen edges"}}},
+      {"forza_performance_overlay", "forza_performance_overlay", "Performance overlay", "",
+       {{"off", "Off"}, {"fps", "FPS"}, {"graph", "FPS + frame-time graph"}}},
+      {"preset", "", "Quality preset", "custom",
+       {{"custom", "Custom"}, {"auto", "Auto (recommended)"}, {"low", "Low"},
+        {"medium", "Medium"}, {"high", "High"}}},
   };
   auto &modes = settings[1].choices;
 #ifdef _WIN32
@@ -295,6 +307,7 @@ void Snapshot() {
                                {"fsr3_native", "FSR 3 Native AA"}});
   }
   for (auto &setting : settings) {
+    if (setting.key == "preset") continue;
     setting.value = rex::cvar::GetFlagByName(setting.cvar);
     if (setting.value.empty())
       setting.value = setting.choices.front().value;
@@ -305,7 +318,7 @@ void Snapshot() {
     settings[1].value = "fsr3_" + rex::cvar::GetFlagByName("fsr3_mode");
   if (!saved_settings.empty()) {
     for (size_t i = 0; i < settings.size(); ++i)
-      if (!IsLive(settings[i]))
+      if (!IsLive(settings[i]) && settings[i].key != "preset")
         settings[i].value = saved_settings[i].value;
   }
   RememberPreview();
@@ -320,12 +333,14 @@ bool Save() {
   temp += ".tmp";
   std::ofstream out(temp, std::ios::binary | std::ios::trunc);
   out << "{\n  \"version\": 1,\n  \"settings\": {\n";
-  for (size_t i = 0; i < settings.size(); ++i) {
-    const auto &s = settings[i];
-    out << "    \"" << s.key << "\": \"" << s.value << "\""
-        << (i + 1 < settings.size() ? "," : "") << "\n";
+  bool first = true;
+  for (const auto &s : settings) {
+    if (s.key == "preset") continue;
+    if (!first) out << ",\n";
+    first = false;
+    out << "    \"" << s.key << "\": \"" << s.value << "\"";
   }
-  out << "  }\n}\n";
+  out << "\n  }\n}\n";
   out.close();
   if (!out)
     return false;
@@ -345,6 +360,7 @@ bool Save() {
 extern "C" REX_FUNC(MenuBind) {
   using namespace forza::graphics_menu;
   active_menu = ctx.r3.u32;
+  from_main_menu = false;
   Native ui(ctx, base);
   if (ui) {
     ui.Add(active_menu, kGraphics, "GRAPHICS");
@@ -375,6 +391,7 @@ std::vector<uint32_t> native_rows;
 uint32_t empty_pause_source = 0;
 void PauseRows(Native &ui, uint8_t *base, bool show) {
   auto component = Read(base, active_menu + 0x170);
+  const auto source = from_main_menu ? Read(base, active_menu + 0x174) : active_menu + 0x174;
   if (!show && !empty_pause_source) {
     empty_pause_source = ui.Call(0x824265C8, {0x38});
     if (!empty_pause_source)
@@ -382,13 +399,13 @@ void PauseRows(Native &ui, uint8_t *base, bool show) {
     ui.Call(0x828EED20, {empty_pause_source});
   }
   ui.Call(0x828B82C8,
-          {component, show ? active_menu + 0x174 : empty_pause_source});
+          {component, show ? source : empty_pause_source});
   ui.Call(Read(base, Read(base, component + 0x6C) + 0x28), {component + 0x6C});
   if (show && empty_pause_source) {
     ui.Call(Read(base, Read(base, empty_pause_source)),
             {empty_pause_source, 1});
     empty_pause_source = 0;
-    ui.Call(0x827D6348, {active_menu});
+    if (!from_main_menu) ui.Call(0x827D6348, {active_menu});
   }
 }
 const char *Help(size_t i) {
@@ -399,8 +416,50 @@ const char *Help(size_t i) {
       "Maximum frame rate. Save applies the limit without restarting.",
       "Synchronize presentation with the display. Previews immediately. Back undoes unsaved edits.",
       "Improve texture detail on roads and distant surfaces. Previews immediately. Back undoes unsaved edits.",
-      "Move ultrawide HUD anchors to the center or edges. Previews immediately when HUD layout is enabled."};
+      "Move ultrawide HUD anchors to the center or edges. Previews immediately when HUD layout is enabled.",
+      "Show measured game FPS, optionally with recent frame times in milliseconds. Previews immediately.",
+      "Adjust reconstruction and filtering together. Auto uses available features and output size, not a benchmark. HUD and FPS limit stay unchanged."};
   return i < std::size(help) ? help[i] : "Save applies graphics changes without restarting.";
+}
+void SyncSettings(Native &ui, uint8_t *base) {
+  const auto previous_output = settings[0].value;
+  const auto previous_mode = settings[1].value;
+  const auto previous_scale = settings[2].value;
+  const auto previous_filtering = settings[5].value;
+  const auto previous_preset = settings[8].value;
+  for (size_t i = 0; i < native_rows.size(); ++i) {
+    const auto choice = Read(base, native_rows[i] + 8);
+    if (choice < settings[i].choices.size())
+      settings[i].value = settings[i].choices[choice].value;
+  }
+  bool refresh = false;
+  if (settings[8].value != previous_preset && settings[8].value != "custom") {
+    const auto &modes = settings[1].choices;
+    auto available = [&](const char *mode) {
+      return std::any_of(modes.begin(), modes.end(), [&](const Choice &choice) {
+        return choice.value == mode;
+      });
+    };
+    const auto preset = ChoosePreset(settings[8].value, settings[0].value,
+                                     available("quality"), available("fsr3_quality"));
+    settings[1].value = preset.mode;
+    settings[2].value = std::to_string(preset.scene_scale);
+    settings[5].value = std::to_string(preset.filtering);
+    refresh = true;
+  } else if (settings[0].value != previous_output || settings[1].value != previous_mode || settings[2].value != previous_scale ||
+             settings[5].value != previous_filtering) {
+    settings[8].value = "custom";
+    refresh = true;
+  }
+  if (refresh) {
+    for (size_t i : {size_t(1), size_t(2), size_t(5), size_t(8)}) {
+      for (size_t j = 0; j < settings[i].choices.size(); ++j)
+        if (settings[i].choices[j].value == settings[i].value)
+          Write(base, native_rows[i] + 8, uint32_t(j));
+    }
+    const auto component = Read(base, graphics_screen + 0x16C);
+    ui.Call(Read(base, Read(base, component + 0x6C) + 0x28), {component + 0x6C});
+  }
 }
 void Footer(Native &ui, uint8_t *base) {
   auto footer = ui.Call(0x82746638, {graphics_screen});
@@ -495,11 +554,7 @@ extern "C" REX_FUNC(sub_82739190) {
   if (ctx.r5.u32 == component + 8) {
     ui.Binding(graphics_screen + 0x17C, Help(ctx.r6.u32));
   } else {
-    for (size_t i = 0; i < native_rows.size(); ++i) {
-      auto choice = Read(base, native_rows[i] + 8);
-      if (choice < settings[i].choices.size())
-        settings[i].value = settings[i].choices[choice].value;
-    }
+    SyncSettings(ui, base);
     ApplyPreview();
   }
 }
@@ -538,11 +593,7 @@ extern "C" REX_FUNC(sub_82736B08) {
   auto event = ui.Event(graphics_screen, ctx.r4.u32);
   if (!applying_request.empty()) return;
   if (event == 0x5D) {
-    for (size_t i = 0; i < native_rows.size(); ++i) {
-      auto choice = Read(base, native_rows[i] + 8);
-      if (choice < settings[i].choices.size())
-        settings[i].value = settings[i].choices[choice].value;
-    }
+    SyncSettings(ui, base);
     if (!applying_request.empty()) return;
     if (rex::cvar::GetFlagByName("gpu_backend") != "vulkan" ||
         !rex::cvar::GetFlagInfo("fh1_graphics_request")) {
@@ -569,40 +620,76 @@ extern "C" REX_FUNC(sub_82736B08) {
     auto component = Read(base, graphics_screen + 0x16C);
     ui.Call(Read(base, Read(base, component) + 0x34), {component, ctx.r4.u32});
     // Read the spinner's final model after its callback dispatch has completed.
-    for (size_t i = 0; i < native_rows.size(); ++i) {
-      auto choice = Read(base, native_rows[i] + 8);
-      if (choice < settings[i].choices.size())
-        settings[i].value = settings[i].choices[choice].value;
-    }
+    SyncSettings(ui, base);
     if (!ApplyPreview())
       ui.Binding(graphics_screen + 0x17C,
                  "Could not apply this live change. Back restores the previous "
                  "settings.");
   }
 }
+namespace forza::graphics_menu {
+namespace {
+void OpenGraphics(PPCContext &ctx, uint8_t *base) {
+  Snapshot();
+  Native ui(ctx, base);
+  if (!ui) return;
+  opening_graphics = true;
+  const auto params = ui.Call(0x824265C8, {0x88});
+  if (!params) { opening_graphics = false; return; }
+  ui.Call(0x825A5640, {params, 0});
+  const auto title = ui.Text("GRAPHICS SETTINGS");
+  ui.Call(0x82471820, {params + 0xC, title});
+  ui.Call(0x824CEAB0, {title});
+  Write(base, ui.scratch(), params);
+  ui.Call(0x82675B00, {active_menu, 5, ui.scratch(), 0});
+  REXLOG_INFO("Graphics menu: opening native graphics settings from {}",
+              from_main_menu ? "main menu" : "pause menu");
+}
+}
+}
 extern "C" REX_FUNC(MenuSelect) {
   using namespace forza::graphics_menu;
   if (ctx.r3.u32 == active_menu && ctx.r4.u32 == 2 && ctx.r6.u32 == kGraphics) {
-    Snapshot();
-    opening_graphics = true;
-    Native ui(ctx, base);
-    if (!ui)
-      return;
-    auto params = ui.Call(0x824265C8, {0x88});
-    ui.Call(0x825A5640, {params, 0});
-    auto title = ui.Text("GRAPHICS SETTINGS");
-    ui.Call(0x82471820, {params + 0xC, title});
-    ui.Call(0x824CEAB0, {title});
-    Write(base, ui.scratch(), params);
-    ui.Call(0x82675B00, {active_menu, 5, ui.scratch(), 0});
-    REXLOG_INFO("Graphics menu: opening native graphics settings scene");
+    from_main_menu = false;
+    OpenGraphics(ctx, base);
     return;
   }
   OriginalSelect(ctx, base);
 }
 
+extern "C" REX_FUNC(__imp__sub_8283CB68);
+extern "C" REX_FUNC(__imp__sub_82836928);
+// CSplash's root choice list (Single Player / Multiplayer / Horizon Rally).
+// The older CMainMenu and Kinect menu classes are not used in this flow.
+extern "C" REX_FUNC(sub_8283CB68) {
+  using namespace forza::graphics_menu;
+  const uint32_t menu = ctx.r3.u32;
+  __imp__sub_8283CB68(ctx, base);
+  main_menu = menu;
+  const auto source = Read(base, menu + 0x174);
+  Native ui(ctx, base);
+  if (source && ui) {
+    ui.AddSource(source, kGraphics, "GRAPHICS");
+    const auto component = Read(base, menu + 0x170);
+    ui.Call(Read(base, Read(base, component + 0x6C) + 0x28), {component + 0x6C});
+    REXLOG_INFO("Graphics menu: native main-menu entry added");
+  }
+}
+extern "C" REX_FUNC(sub_82836928) {
+  using namespace forza::graphics_menu;
+  if (ctx.r3.u32 == main_menu && ctx.r4.u32 == 2 && ctx.r6.u32 == kGraphics &&
+      Read(base, main_menu + 0x260) == 12) {
+    active_menu = main_menu;
+    from_main_menu = true;
+    OpenGraphics(ctx, base);
+    return;
+  }
+  __imp__sub_82836928(ctx, base);
+}
+
 namespace forza::graphics_menu {
 void Tick(PPCContext& ctx, uint8_t* base) {
+  UpdatePerformanceOverlay();
   if (applying_request.empty()) return;
   const auto result = rex::cvar::GetFlagByName("fh1_graphics_result");
   const auto prefix = applying_request + "|";
@@ -635,6 +722,6 @@ void Tick(PPCContext& ctx, uint8_t* base) {
 } // namespace forza::graphics_menu
 #else
 namespace forza::graphics_menu {
-void Tick(PPCContext&, uint8_t*) {}
+void Tick(PPCContext&, uint8_t*) { UpdatePerformanceOverlay(); }
 }
 #endif // FORZA_TU4

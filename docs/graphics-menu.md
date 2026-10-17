@@ -1,6 +1,7 @@
 # In-game graphics settings
 
-On Title Update 4, open **Graphics** above **Quit** in the original pause menu.
+On Title Update 4, open **Graphics** above **Quit** in the original pause menu,
+or below **Horizon Rally** on the main menu before gameplay.
 The screen uses the original difficulty screen's spinner list, font, selection
 highlight and controller input. No replacement game assets are installed.
 
@@ -9,6 +10,33 @@ filtering and HUD placement preview immediately. **A / Save** applies resolution
 DLSS/DLAA/FSR 3 mode, native scene scale and frame limit in the running game, and
 persists the choices. No game relaunch is needed. **B / Back** restores unsaved
 previews; it does not undo settings that were already applied and saved.
+
+**Performance overlay** offers Off, FPS, and FPS + frame-time graph. It previews
+immediately and Back restores the previous choice. The counter measures guest
+VdSwap frames, not simulation ticks or UI redraws. FPS uses a rolling second of
+elapsed frame intervals; the graph keeps the last 240 intervals and auto-ranges
+to retain long stalls. It draws over the native output without taking input.
+The passive dialog does not request continuous presenter redraws (SDK patch
+0076); interactive dialogs retain their existing repaint behavior.
+
+**Quality preset** offers Custom, Auto, Low, Medium, and High. These are bundles
+of reconstruction and texture filtering; they do not change the game's model,
+shadow, or reflection quality. Output resolution, HUD placement, FPS cap, VSync,
+and the monitoring overlay remain unchanged. Manual reconstruction, scene-scale,
+or filtering edits return the selector to Custom. The preset selector itself
+is an action; the resulting individual settings are persisted.
+
+| Preset | Reconstruction when available | Filtering | Native fallback scale |
+| --- | --- | --- | --- |
+| Low | DLSS / FSR 3 Performance | 2x | 1x |
+| Medium | DLSS / FSR 3 Balanced | 8x | output scale |
+| High | DLSS / FSR 3 Quality | 16x | output scale |
+| Auto | Native at 1080p; Quality above 1080p | 16x | output scale |
+
+DLSS is offered only when its Windows/Vulkan runtime is available; otherwise
+Vulkan presets use FSR 3. Auto chooses from supported features and the selected
+output size. It does not benchmark or guarantee a target frame rate. At 4K,
+the native fallback scale is 3x, which remains experimental.
 
 The GPU receives one complete request, finishes its current frame and waits for
 outstanding submissions before replacing scale-dependent render targets,
@@ -71,3 +99,16 @@ Disc-mode syntax checks of the hook and app integration pass. The complete disc
 build and AMD/D3D12 runtime testing were not available locally. These checks
 do not establish general DLSS driver stability or cover every gameplay/event
 transition.
+
+The monitoring/preset extension was checked on the same clean public SDK build:
+main-menu entry -> Graphics -> Auto -> Save -> Back -> Single Player -> free roam,
+then Low / Medium / High and overlay FPS / graph / Off from the pause menu. Back
+restored the saved graph mode and filtering. Auto saved DLSS Quality at 1440p in
+the same process. The overlay read approximately 67-68 FPS in the garage exterior
+while the independent FPS log read 68.1; this is an observed test scene, not a
+benchmark of each preset. The native settings list displays all nine rows.
+
+The standalone `forza-recomp/tests/graphics_monitor_test.cpp` exercises steady
+30/60 FPS, long hitches, stale samples, ring wraparound, and preset fallbacks.
+It builds without the SDK using a C++17 compiler. All 12 menu launcher tests pass;
+the full 183-test launcher suite retains the same 15 existing failures as #121.
